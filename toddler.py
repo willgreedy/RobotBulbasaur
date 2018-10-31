@@ -12,6 +12,9 @@ import time
 import sys        
 import numpy as np      
 
+
+
+
 class SensorLocations:
 
     def __init__(self):
@@ -206,6 +209,31 @@ class ServoManager():
         
     def getPosition(self):
         return self.currentAngle
+    
+    
+class Map:
+    
+    def __init__(self):
+        outer_wall = [(0, 1.05),
+                      (1.05, 1.05),
+                      (1.05, 0),
+                      (2.9, 0),
+                      (3.2, 0.3),
+                      (3.2, 4.25),
+                      (0.7, 4.25),
+                      (0, 3.65)]
+        
+        tri_obstacle = [(1, 3.2),
+                        (1.6495, 2.825),
+                        (1, 2.45)]
+        
+        rect_obstacle = [(2.29, 3.2),
+                         (2.45, 3.2),
+                         (2.45, 1.05),
+                         (2.29, 1.05)]
+        
+        self.obstacles = [outer_wall, tri_obstacle, rect_obstacle]
+        
 
 class Toddler:
     __version = '2018a'
@@ -229,7 +257,7 @@ class Toddler:
         self.motorBoard.turnLightOn()
         
         self.startPos = np.array([1.4, 0.41])
-        self.satellitePos = np.array([0.71, 0.41])
+        self.satellitePos = np.array([0.69, -0.1])
         self.satelliteHeight = 2.95
         
         self.servoHeight = 0.2
