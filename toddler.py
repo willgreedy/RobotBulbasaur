@@ -350,7 +350,7 @@ class ParticleFilter:
             elif command == 'turn_left':
                 particle.turnLeft(duration)
             elif command == 'turn_right':
-                particle.turn_right(duration)
+                particle.turnRight(duration)
 
     def measurementProb(self, particle, measurements):
         leftIRReading = measurements['leftIR']
