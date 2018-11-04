@@ -10,9 +10,21 @@ Created on Thu Oct 11 11:25:29 2018
 
 import time
 import sys        
-import numpy as np      
+import numpy as np
+from copy import copy
+
+# UPDATE THESE BASED ON EXPERIMENTS
+motorFullTurnTime = 5.2
+motorSpeed = 0.425
+
+motorTurnNoise = 20
+motorForwardNoise = 10
 
 
+leftIRSensorLocalPosition = np.array([-0.13, 0.15])
+leftIRSensorAngleOffset = -45
+rightIRSensorLocalPosition = np.array([0.13, 0.15])
+rightIRSensorAngleOffset = 45
 
 
 class SensorLocations:
@@ -132,9 +144,6 @@ class MotorBoardManager:
         self.motorControl = motor_control
         self.motorsEngaged = False
         self.motorStartTime = -1
-        #self.quarterTurnTime = 1.9
-        #self.quarterTurnTime = 1.5
-        self.quarterTurnTime = 1.3
         
     def turnLightOn(self):
         lightLocation = self.motorBoardLocations.getLight()
@@ -211,7 +220,7 @@ class ServoManager():
         return self.currentAngle
     
     
-class Map:
+class ArenaMap:
     
     def __init__(self):
         outer_wall = [(0, 1.05),
@@ -231,9 +240,168 @@ class Map:
                          (2.45, 3.2),
                          (2.45, 1.05),
                          (2.29, 1.05)]
-        
+
+
+        self.bounds_rect = [(0, 0), (3.2, 4.25)]
         self.obstacles = [outer_wall, tri_obstacle, rect_obstacle]
         
+    def checkClosestCollision(self, start, end):
+        closest = None
+        closest_dist = np.inf 
+        for obstacle in self.obstacles:
+            for i in range(len(obstacle)):
+                wallp1 = obstacle[i]
+                wallp2 = obstacle[(i+1)%len(obstacle)]
+                collisionLocation = lineSegmentCollision(wallp1, wallp2, start, end)
+                distance = np.linalg.norm(start - collisionLocation)
+                if distance < closest_dist:
+                    closest = collisionLocation
+                    closest_dist = distance
+        if closest != None:
+            return closest
+        else:
+            return False
+    
+    def checkInsideMap(self, p):
+        #inBounds = p[0] < self.bounds_rect[1][0] and p[0] > self.bounds_rect[0][0] and p[1] < self.bounds_rect[1][1] and p[1] > self.bounds_rect[1][0]
+        #inCorner = p0
+        return True
+
+
+class Particle:
+
+    def __init__(self, arenaMap, pos, orient):
+        self.arenaMap = arenaMap
+        self.pos = pos
+        self.orient = orient
+
+    def moveForward(self, duration, backwards=False):
+        orientVec = computeOrientationVector(self.orient)
+        self.pos += (-1 if backwards else 1) * orientVec * motorSpeed * duration + np.random.normal(0, motorForwardNoise)
+
+    def moveBackwards(self, duration):
+        self.moveForward(duration, backwards=True)
+
+    def turn(self, duration, isLeft):
+        print("BEFORE: " + str(self.orient))
+        self.orient += (-1 if isLeft else 1) * duration / motorFullTurnTime * 360 + np.random.normal(0, motorTurnNoise)
+        self.orient %= 360
+        print("AFTER: " + str(self.orient))
+
+    def turnLeft(self, duration):
+        self.turn(duration, isLeft=True)
+
+    def turnRight(self, duration):
+        self.turn(duration, isLeft=False)
+        
+    def senseLeftIR(self):
+
+        leftIRGlobalPosition = computeOrientationVector(self.orient, referenceVec=leftIRSensorLocalPosition)
+        leftIROrientVector = computeOrientationVector((self.orient + leftIRSensorAngleOffset) % 360)
+        
+        irRange = 5
+        
+        collisionLocation = self.arenaMap.checkClosestCollision(leftIRGlobalPosition, leftIRGlobalPosition + irRange * leftIROrientVector)
+        assert(collisionLocation, "Particle's Left IR sensor didn't collide")
+
+        distance = np.linalg.norm(collisionLocation - leftIRGlobalPosition)
+        
+        return distance
+        
+    def senseRightIR(self):
+
+        rightIRGlobalPosition = computeOrientationVector(self.orient, referenceVec=rightIRSensorLocalPosition)
+        rightIROrientVector = computeOrientationVector((self.orient + rightIRSensorAngleOffset) % 360)
+        
+        irRange = 5
+        
+        collisionLocation = self.arenaMap.checkClosestCollision(rightIRGlobalPosition, rightIRGlobalPosition + irRange * rightIROrientVector)
+        assert(collisionLocation, "Particle's Right IR sensor didn't collide")
+
+        distance = np.linalg.norm(collisionLocation - rightIRGlobalPosition)
+        
+        return distance
+
+class ParticleFilter:
+
+    def __init__(self, arenaMap, num_particles):
+        
+        self.arenaMap = arenaMap 
+        self.particles = []
+        while len(self.particles) < num_particles:
+            #x = np.random.uniform(arenaMap.bounds_rect[0][0], arenaMap.bounds_rect[1][0])
+            #y = np.random.uniform(arenaMap.bounds_rect[0][1], arenaMap.bounds_rect[1][1])
+            
+            x = np.random.uniform(1.275, 1.525)
+            y = np.random.uniform(0.285, 0.535)
+            orient = np.random.uniform(0, 360)
+
+            if arenaMap.checkInsideMap((x, y)):
+                self.particles += [Particle(arenaMap, (x, y), orient)]
+
+    def updateParticles(self, command, duration):
+        if not (command in ['forward', 'backwards', 'turn_left', 'turn_right']):
+            return
+        for particle in self.particles:
+            if command == 'forward':
+                particle.moveForward(duration)
+            elif command == 'backwards':
+                particle.moveBackwards(duration)
+            elif command == 'turn_left':
+                particle.turnLeft(duration)
+            elif command == 'turn_right':
+                particle.turn_right(duration)
+
+    def measurementProb(self, particle, measurements):
+        leftIRReading = measurements['leftIR']
+        rightIRReading = measurements['rightIR']
+        #sonarReading = measurements['sonar']
+        
+        
+        particleLeftIRDistance = particle.senseLeftIR()
+        particleRightIRDistance = particle.senseRightIR()
+        
+        
+        particleLeftIRReading = convertToIRReading(particleLeftIRDistance)
+        particleRightIRReading = convertToIRReading(particleRightIRDistance)
+        
+        irNoiseStd = 15
+        
+        leftProb = gaussian(particleLeftIRReading, irNoiseStd, leftIRReading)
+        rightProb = gaussian(particleRightIRReading, irNoiseStd, rightIRReading)
+        
+        prob = leftProb * rightProb
+        
+        return prob
+
+    def resampleParticles(self, measurements):
+        
+        # Compute Importance weights
+        weights = []
+        for particle in self.particles:
+            likelihood = self.measurementProb(particle, measurements)
+            weights.append(likelihood)
+        total = sum(weights)
+        weights = [w / total for w in weights]
+
+        # Resample Particles
+        newParticles = []
+        beta = 0
+        index = 0
+        maxWeight = max(weights)
+        bestParticle = self.particles[np.argmax(weights)]
+        print("Best particle: " + str(bestParticle.pos[0]) + ", " + str(bestParticle.pos[1]) + ", " + str(bestParticle.orient))
+        print("Best particle readings: " + str(convertToIRReading(bestParticle.senseLeftIR())) + ", " + str(convertToIRReading(bestParticle.senseRightIR())))
+        
+        for i in range(len(self.particles)):
+            beta = beta + 2.0 * maxWeight * np.random.rand()
+            while beta > weights[index]:
+                beta = beta - weights[index]
+                index = (index + 1) % len(self.particles)
+            selectedParticle = copy(self.particles[index])
+            newParticles.append(selectedParticle)
+        
+        self.particles = newParticles
 
 class Toddler:
     __version = '2018a'
@@ -275,6 +443,10 @@ class Toddler:
         else:
             self.currentPos = self.POIpos1
             self.currentOrient = 0
+        
+        self.arenaMap = ArenaMap()
+        self.particleFilter = ParticleFilter(self.arenaMap, 500)
+        self.counter = 0
             
     
     def computeHeadingAndServoRotation(self):
@@ -321,16 +493,23 @@ class Toddler:
         #self.collisionAvoidanceControl()
 
         #self.forwardUntilPOIControl()
-        self.servoPointControl()
-        #self.fullTurnControl()
+        #self.servoPointControl()
+        self.counter += 1
+        if self.counter < 20:
+            self.fullTurnControl()
         
         time.sleep(0.1)
         
-    def fullTurnControl(self):
+    def fullTurnControl(self):        
         self.motorBoard.turnLeft()
-        time.sleep(self.motorBoard.quarterTurnTime)
+        time.sleep(motorFullTurnTime / 10)
+        duration = self.motorBoard.getDuration()
         self.motorBoard.stopMoving()
-        time.sleep(5)
+        measurements = {'leftIR': self.sensors.getIRSensorLeft(), 'rightIR': self.sensors.getIRSensorLeft()}
+        print("IR Readings: " + str(measurements['leftIR']) + ", " + str(measurements['rightIR']))
+        self.particleFilter.resampleParticles(measurements)
+        self.particleFilter.updateParticles('turn_left', duration)
+        time.sleep(1)
         
     def forwardUntilPOIControl(self):
         lightSensors = self.sensors.getLightSensors()
@@ -365,7 +544,7 @@ class Toddler:
             print("turning right")
         
         self.servo.setPosition(servoRotation)
-        while(self.motorBoard.getDuration() < (self.motorBoard.quarterTurnTime * rotationAmountAngle / 90)):
+        while(self.motorBoard.getDuration() < (motorFullTurnTime * rotationAmountAngle / 360)):
             time.sleep(0.01)
         self.motorBoard.stopMoving()
         time.sleep(5)
@@ -444,3 +623,42 @@ class Toddler:
         #self.camera.imshow('Camera', image)
 
 
+
+def computeOrientationVector(orient, referenceVec=np.array([0,1])):
+    assert(orient >= 0.0 and orient <= 360.0)
+    
+    radOrient = np.deg2rad(orient)
+    rotationMat = np.array([[np.cos(radOrient), np.sin(radOrient)],[-np.sin(radOrient), np.cos(radOrient)]])
+    orientVec = np.dot(rotationMat, referenceVec)
+    return orientVec
+
+def lineSegmentCollision(p1, p2, p3, p4):
+    t_a_num = (p3[1] - p4[1])*(p1[0] - p3[0]) + (p4[0] - p3[0])*(p1[1] - p3[1])
+    t_b_num = (p1[1] - p2[1])*(p1[0] - p3[0]) + (p2[0] - p1[0])*(p1[1] - p3[1])
+    
+    t_den = (p4[0] - p3[0])*(p1[1] - p2[1]) - (p1[0] - p2[0])*(p4[1] - p3[1])
+    
+    if t_den == 0:
+        return False
+    
+    t_a = t_a_num / t_den
+    t_b = t_b_num / t_den
+    
+    if t_a < 0 or t_a > 1 or t_b < 0 or t_b > 1:
+        return False
+    
+    intersection_point = (p1[0] + t_a * (p2[0] - p1[0]), p1[1] + t_a * (p2[1] - p1[1]))
+    return intersection_point
+
+def convertToIRReading(distance):
+    if distance < 0.1:
+        return 4700*distance
+    else:
+        return 64.053 / (distance + 0.03623)
+    
+def gaussian(mu, sigma, x):        
+    # Given a x position, mean mu and std sigma of Gaussian, calculates the probability
+    # Note
+    # mu: estimated distance by each particle's position, (map and landmarks are known)
+    # x:  measured distance by the robot
+    return np.exp(- ((mu - x) ** 2) / (sigma ** 2) / 2.0) / np.sqrt(2.0 * np.pi * (sigma ** 2))
