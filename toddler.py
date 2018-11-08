@@ -9,26 +9,34 @@ Created on Thu Oct 11 11:25:29 2018
 #!/usr/bin/env python
 
 import time
-import sys        
 import numpy as np
 from copy import copy
 import cv2
 
 # UPDATE THESE BASED ON EXPERIMENTS
-motorFullTurnTime = 7.0
-motorSpeed = 0.19
+#motorFullTurnTime = 7.0
+motorFullTurnTime = 9.0
+odometerFullTurnCount = 12.0
+#motorSpeed = 0.19
+motorSpeed = 0.25
+odometerSpeed = 3.0 / 59.0
 
-motorTurnNoise = 70
-motorTurnPositionNoise = 0.1
-motorForwardNoise = 0.1
-motorDriftNoise = 5
+#motorTurnNoise = 70
+motorTurnNoise = 25
+motorTurnPositionNoise = 0.01
+motorForwardNoise = 0.05
+motorDriftNoise = 0.0001
 
+robotWidth = 0.25
+robotLength = 0.32
 
-leftIRSensorLocalPosition = np.array([-0.13, 0.15])
+leftIRSensorLocalPosition = np.array([-0.13, 0.16])
 leftIRSensorAngleOffset = -45
-rightIRSensorLocalPosition = np.array([0.13, 0.15])
+rightIRSensorLocalPosition = np.array([0.13, 0.16])
 rightIRSensorAngleOffset = 45
 
+sonarSensorLocalPosition = np.array([0.0, 0.15])
+sonarConeAngle = 25
 
 class SensorLocations:
 
@@ -86,7 +94,7 @@ class SensorManager:
     def update(self):        
         if self.getOdometer() and not self.oldOdometer:
             self.odometerCount += 1
-            print(self.odometerCount)
+            #print(self.odometerCount)
             
         self.oldOdometer = self.getOdometer()
         
@@ -228,7 +236,7 @@ class ServoManager():
 class ArenaMap:
     
     def __init__(self):
-        outer_wall = [(0, 1.05),
+        '''outer_wall = [(0, 1.05),
                       (1.05, 1.05),
                       (1.05, 0),
                       (2.9, 0),
@@ -244,7 +252,24 @@ class ArenaMap:
         rect_obstacle = [(2.29, 3.2),
                          (2.45, 3.2),
                          (2.45, 1.05),
-                         (2.29, 1.05)]
+                         (2.29, 1.05)]'''
+        outer_wall = [(0, 1.08),       
+                      (1.08, 1.08),     
+                      (1.08, 0),        
+                      (2.89, 0),        
+                      (3.22, 0.34),
+                      (3.21, 4.27),
+                      (0.62, 4.27),
+                      (0, 3.57)]
+        
+        tri_obstacle = [(0.99, 3.18),
+                        (1.66, 2.79),
+                        (0.99, 2.41)]
+        
+        rect_obstacle = [(2.24, 3.22),
+                         (2.42, 3.22),
+                         (2.42, 1.08),
+                         (2.24, 1.08)]
         
 
         self.bounds_rect = [(0, 0), (3.2, 4.25)]
@@ -256,7 +281,7 @@ class ArenaMap:
         self.POIpos1 = np.array([1.755, 3.725])
         self.POIpos2 = np.array([0.47, 2.37])
         
-    def checkClosestCollision(self, start, end):
+    def checkCollision(self, start, end, returnPoint=False):
         closest = None
         closest_dist = np.inf 
         for obstacle in self.obstacles:
@@ -264,12 +289,19 @@ class ArenaMap:
                 wallp1 = obstacle[i]
                 wallp2 = obstacle[(i+1)%len(obstacle)]
                 collisionLocation = lineSegmentCollision(wallp1, wallp2, start, end)
+                if collisionLocation == None:
+                    continue
                 distance = np.linalg.norm(start - collisionLocation)
                 if distance < closest_dist:
                     closest = collisionLocation
                     closest_dist = distance
+        
+        #print(closest)
         if closest != None:
-            return closest
+            if returnPoint:
+                return closest
+            else:
+                return True
         else:
             return False
     
@@ -277,7 +309,27 @@ class ArenaMap:
         #inBounds = p[0] < self.bounds_rect[1][0] and p[0] > self.bounds_rect[0][0] and p[1] < self.bounds_rect[1][1] and p[1] > self.bounds_rect[1][0]
         #inCorner = p0
         return True
-
+    
+    def checkRobotCollision(self, pos, orient):
+        forward = computeOrientationVector(orient) * robotLength / 2
+        right = computeOrientationVector((orient + 90) % 360) * robotWidth / 2
+        
+        #print(forward)
+        #print(right)
+        
+        frontLeft = np.array(pos) + forward - right
+        frontRight = np.array(pos) + forward + right
+        backLeft = np.array(pos) - forward - right
+        backRight = np.array(pos) - forward + right
+        
+        frontCollide = self.checkCollision(frontLeft, frontRight)
+        rightCollide = self.checkCollision(frontRight, backRight)
+        backCollide = self.checkCollision(backRight, backLeft)
+        leftCollide = self.checkCollision(backLeft, frontLeft)
+        
+        #print([frontCollide, rightCollide, backCollide, leftCollide])
+        
+        return frontCollide or backCollide or leftCollide or rightCollide
 
 class Particle:
 
@@ -288,33 +340,44 @@ class Particle:
         
         self.weight = 0
 
-    def moveForward(self, duration, backwards=False):
+    def moveForward(self, duration, odometerCount, backwards=False):
         orientVec = computeOrientationVector(self.orient)
-        perpendicularVec = computeOrientationVector((self.orient + 90) % 360)
         
-        forwardNoise = motorSpeed * orientVec * duration * np.random.normal(0, motorForwardNoise)
+        
+        if duration < 2:
+            distanceMoved = motorSpeed * duration
+        else:    
+            distanceMoved = odometerCount * odometerSpeed
+        
+        
+        forwardNoise =  distanceMoved * orientVec * np.random.normal(0, motorForwardNoise)
         
         #print(noise)
         #print("Prev: "+ str(self.pos))
-        newX = self.pos[0] + (-1 if backwards else 1) * orientVec[0] * motorSpeed * duration + forwardNoise[0]
-        newY = self.pos[1] + (-1 if backwards else 1) * orientVec[1] * motorSpeed * duration + forwardNoise[1]
+        newX = self.pos[0] + (-1 if backwards else 1) * orientVec[0] * distanceMoved + forwardNoise[0]
+        newY = self.pos[1] + (-1 if backwards else 1) * orientVec[1] * distanceMoved + forwardNoise[1]
         self.pos = (newX, newY)
         
         #print(self.orient)
-        driftNoise = motorSpeed * duration * np.random.normal(0, motorDriftNoise)
+        driftNoise = distanceMoved * np.random.normal(0, motorDriftNoise)
         self.orient += driftNoise
         self.orient %= 360
         #print(self.orient)
         #print("After: " + str(self.pos))
 
-    def moveBackwards(self, duration):
-        self.moveForward(duration, backwards=True)
+    def moveBackwards(self, duration, odometerCount):
+        self.moveForward(duration, odometerCount, backwards=True)
 
-    def turn(self, duration, isLeft):
+    def turn(self, duration, odometerCount, isLeft):
         #print("BEFORE: " + str(self.orient))
-        turns = duration / motorFullTurnTime
         
-        self.orient += (-1 if isLeft else 1) * duration / motorFullTurnTime * 360 + turns * np.random.normal(0, motorTurnNoise)
+        if duration < 2:
+            turns = duration / motorFullTurnTime        
+        else:
+            turns = odometerCount / odometerFullTurnCount
+        
+        #self.orient += (-1 if isLeft else 1) * duration / motorFullTurnTime * 360 + turns * np.random.normal(0, motorTurnNoise)
+        self.orient += (-1 if isLeft else 1) * turns * 360 + turns * np.random.normal(0, motorTurnNoise)
         self.orient %= 360
         
         newX = self.pos[0] + turns * np.random.normal(0, motorTurnPositionNoise)
@@ -322,22 +385,21 @@ class Particle:
         self.pos = (newX, newY)
         #print("AFTER: " + str(self.orient))
 
-    def turnLeft(self, duration):
-        self.turn(duration, isLeft=True)
+    def turnLeft(self, duration, odometerCount):
+        self.turn(duration, odometerCount, isLeft=True)
 
-    def turnRight(self, duration):
-        self.turn(duration, isLeft=False)
+    def turnRight(self, duration, odometerCount):
+        self.turn(duration, odometerCount, isLeft=False)
         
     def senseLeftIR(self):
 
-        leftIRGlobalPosition = self.pos + computeOrientationVector(self.orient, referenceVec=leftIRSensorLocalPosition)
-        leftIROrientVector = computeOrientationVector((self.orient + leftIRSensorAngleOffset) % 360)
+        leftIRGlobalPosition, leftIROrientVector = computeLeftIRPositionAndOrientationVector(self)
         
         irRange = 5
         
-        collisionLocation = self.arenaMap.checkClosestCollision(leftIRGlobalPosition, leftIRGlobalPosition + irRange * leftIROrientVector)
+        collisionLocation = self.arenaMap.checkCollision(leftIRGlobalPosition, leftIRGlobalPosition + irRange * leftIROrientVector, returnPoint=True)
         #print("LeftIRGlobalPosition: " + str(leftIRGlobalPosition))
-        assert(collisionLocation, "Particle's Left IR sensor didn't collide")
+        #assert(collisionLocation, "Particle's Left IR sensor didn't collide")
 
         distance = np.linalg.norm(collisionLocation - leftIRGlobalPosition)
         
@@ -350,13 +412,31 @@ class Particle:
         
         irRange = 5
         
-        collisionLocation = self.arenaMap.checkClosestCollision(rightIRGlobalPosition, rightIRGlobalPosition + irRange * rightIROrientVector)
+        collisionLocation = self.arenaMap.checkCollision(rightIRGlobalPosition, rightIRGlobalPosition + irRange * rightIROrientVector, returnPoint=True)
         #print("RightIRGlobalPosition: " + str(rightIRGlobalPosition))
-        assert(collisionLocation, "Particle's Right IR sensor didn't collide")
+        #assert(collisionLocation, "Particle's Right IR sensor didn't collide")
 
         distance = np.linalg.norm(collisionLocation - rightIRGlobalPosition)
         
         return distance
+
+    def senseSonar(self):
+        
+        sonarGlobalPosition, sonarOrientVector, sonarLeftOrientVector, sonarRightOrientVector = computeSonarPositionAndOrientVectors(self)
+        
+        sonarRange = 10
+        
+        forwardCollisionLocation = self.arenaMap.checkCollision(sonarGlobalPosition, sonarGlobalPosition + sonarRange * sonarOrientVector, returnPoint=True)
+        leftCollisionLocation = self.arenaMap.checkCollision(sonarGlobalPosition, sonarGlobalPosition + sonarRange * sonarLeftOrientVector, returnPoint=True)
+        rightCollisionLocation = self.arenaMap.checkCollision(sonarGlobalPosition, sonarGlobalPosition + sonarRange * sonarRightOrientVector, returnPoint=True)
+        
+        #assert(collisionLocation, "Sonar didn't collide")
+        
+        forwardDistance = np.linalg.norm(forwardCollisionLocation - sonarGlobalPosition)
+        leftDistance =  np.linalg.norm(leftCollisionLocation - sonarGlobalPosition)
+        rightDistance = np.linalg.norm(rightCollisionLocation - sonarGlobalPosition)
+        
+        return min([forwardDistance, leftDistance, rightDistance])
 
 class ParticleFilter:
 
@@ -370,56 +450,72 @@ class ParticleFilter:
             
             #x = np.random.uniform(1.275, 1.525)
             #y = np.random.uniform(0.285, 0.535)
+        
+            #x = 3.06 + np.random.uniform(0.05, 0.05)
+            #y = 0.44 + np.random.uniform(-0.05, 0.05)
             
-            x = self.arenaMap.startPos[0] + np.random.uniform(0, 0.25)
-            y = self.arenaMap.startPos[1] + np.random.uniform(0, 0.25) + 0.5
-            orient = np.random.uniform(35, 55) % 360
+            x = 1.0 + np.random.uniform(0.05, 0.05)
+            y = 1.58 + np.random.uniform(-0.05, 0.05)
+            
+            orient = (90 + np.random.uniform(-5, 5)) % 360
 
             if arenaMap.checkInsideMap((x, y)):
                 self.particles += [Particle(arenaMap, (x, y), orient)]
 
-    def updateParticles(self, command, duration):
+    def updateParticles(self, command, duration, odometerCount):
         if not (command in ['forward', 'backwards', 'turn_left', 'turn_right']):
             return
         for particle in self.particles:
             if command == 'forward':
-                particle.moveForward(duration)
+                particle.moveForward(duration, odometerCount)
             elif command == 'backwards':
-                particle.moveBackwards(duration)
+                particle.moveBackwards(duration, odometerCount)
             elif command == 'turn_left':
-                particle.turnLeft(duration)
+                particle.turnLeft(duration, odometerCount)
             elif command == 'turn_right':
-                particle.turnRight(duration)
+                particle.turnRight(duration, odometerCount)
 
     def measurementProb(self, particle, measurements):
         leftIRReading = measurements['leftIR']
         rightIRReading = measurements['rightIR']
-        #sonarReading = measurements['sonar']
+        sonarReading = measurements['sonar']
 
         particleLeftIRDistance = particle.senseLeftIR()
         particleLeftIRReading = convertToLeftIRReading(particleLeftIRDistance)
 
-        leftIRNoiseStd = self.computeIRNoise(particleLeftIRDistance)
+        leftIRNoiseStd = self.computeIRNoise(particleLeftIRDistance) * 3
         leftProb = gaussian(particleLeftIRReading, leftIRNoiseStd, leftIRReading)
 
 
         particleRightIRDistance = particle.senseRightIR()        
         particleRightIRReading = convertToRightIRReading(particleRightIRDistance)
         
-        rightIRNoiseStd = self.computeIRNoise(particleRightIRDistance)
+        rightIRNoiseStd = self.computeIRNoise(particleRightIRDistance)* 3
         rightProb = gaussian(particleRightIRReading, rightIRNoiseStd, rightIRReading)
         
+    
+        particleSonarDistance = particle.senseSonar()
+        particleSonarReading = convertToSonarReading(particleSonarDistance)
         
+        sonarNoiseStd = 30
+        sonarProb = gaussian(particleSonarReading, sonarNoiseStd, sonarReading)
+        
+        #collided = self.arenaMap.checkRobotCollision(particle.pos, particle.orient)
+        #validPos = 0 if collided else 1
         #print("Left prob: " + str(particleLeftIRDistance) + ", Right prob: " + str(particleRightIRDistance))
         
-        prob = leftProb * rightProb
+        #print("LeftIR = " + str(leftIRReading) + ", Prediction = " + str(particleLeftIRReading) + " - Distance = " + str(particleLeftIRDistance))
+        #print("RightIR = " + str(rightIRReading) + ", Prediction = " + str(particleRightIRReading) + " - Distance = " + str(particleRightIRDistance))
+        #print("Sonar = " + str(sonarReading) + ", Predi
+        
+        prob = leftProb * rightProb * sonarProb#* validPos
         
         return prob
     
     def computeIRNoise(self, distance):
         closeIRNoiseStd = 100
-        normalIRNoiseStd = 10
-        maxIRNoiseStd = 40
+        normalIRNoiseStd = 20
+        maxIRNoiseStd = 50
 
         maxAccurateRange = 1.0
         
@@ -438,9 +534,10 @@ class ParticleFilter:
         weights = []
         for particle in self.particles:
             likelihood = self.measurementProb(particle, measurements)
-            particle.weight = likelihood + 0.0000000001
+            particle.weight = likelihood
         weights = [particle.weight for particle in self.particles]
         total = sum(weights)
+        print(total)
         for particle in self.particles:
             particle.weight /= total
             
@@ -500,7 +597,7 @@ class Toddler:
             self.currentOrient = 0
         '''
         self.arenaMap = ArenaMap()
-        self.particleFilter = ParticleFilter(self.arenaMap, 500)
+        self.particleFilter = ParticleFilter(self.arenaMap, 300)
         self.mapRenderer = MapRenderer(self.arenaMap, self.particleFilter)
         self.counter = 0
             
@@ -546,17 +643,61 @@ class Toddler:
     
     def control(self):
         
-        #self.collisionAvoidanceControl()
+        
+        self.collisionAvoidanceControl()
+        #self.particleFilterControl()
 
         #self.forwardUntilPOIControl()
         #self.servoPointControl()
         
         #self.moveForwardControl()
         #self.fullTurnControl()
-        self.collisionAvoidanceControl()
+        #self.collisionAvoidanceControl()
+        #self.printSensorControl()
+        #self.printOdometerAndMoveControl()
         
-        time.sleep(0.1)
+        time.sleep(0.05)
         
+    def printOdometerAndMoveControl(self):
+        self.motorBoard.turnLeft()
+        odometerCount = self.sensors.getOdometerCount()
+        #while odometerCount < 58:
+        while odometerCount < 12:
+            self.sensors.update()
+            odometerCount = self.sensors.getOdometerCount()
+            print(odometerCount)
+        #time.sleep(0.05)
+        self.motorBoard.stopMoving()
+        time.sleep(5)
+        
+        
+    def printSensorControl(self):
+        leftIR = self.sensors.getIRSensorLeft()
+        rightIR = self.sensors.getIRSensorRight()
+        sonar = self.sensors.getSonar()
+        
+        particle = self.particleFilter.particles[0]
+        
+        particleLeftIRDistance = particle.senseLeftIR()
+        particleLeftIRReading = convertToLeftIRReading(particleLeftIRDistance)
+        
+        particleRightIRDistance = particle.senseRightIR()
+        particleRightIRReading = convertToRightIRReading(particleRightIRDistance)
+        
+        particleSonarDistance = particle.senseSonar()
+        particleSonarReading = convertToSonarReading(particleSonarDistance)
+        
+        print('Left Distance = ', particleLeftIRDistance, 'Predicted IR = ', particleLeftIRReading, 'Actual Reading = ', leftIR)
+        print('Right Distance = ', particleRightIRDistance, ', Predicted IR = ', particleRightIRReading, 'Actual Reading = ', rightIR)
+        print('Sonar Distance = ', particleSonarDistance, 'Predicted = ', particleSonarReading, 'Actual Reading = ', sonar)
+    
+    def printSonarControl(self):
+        readings = []
+        for i in range(1):
+            reading = self.sensors.getSonar()
+            readings += [reading]
+            time.sleep(0.05)
+        print(np.mean(readings))
     
     def moveForwardControl(self):
         self.motorBoard.moveForward()
@@ -571,10 +712,23 @@ class Toddler:
         time.sleep(3)
         
     def executeCommand(self, command, duration):
-        measurements = {'leftIR': self.sensors.getIRSensorLeft(), 'rightIR': self.sensors.getIRSensorRight()}    
-        self.particleFilter.resampleParticles(measurements)
-        self.particleFilter.updateParticles(command, duration)
         
+        leftIRReadings = []
+        rightIRReadings = []
+        
+        for i in range(5):
+            leftIRReadings += [self.sensors.getIRSensorLeft()]
+            rightIRReadings += [self.sensors.getIRSensorRight()]
+            time.sleep(0.05)
+        
+        sonarReading = self.sensors.getSonar()
+        
+        measurements = {'leftIR': np.mean(leftIRReadings), 'rightIR': np.mean(rightIRReadings), 'sonar': sonarReading}    
+        self.particleFilter.resampleParticles(measurements)
+        odometerCount = self.sensors.getOdometerCount()
+        print(odometerCount)
+        self.particleFilter.updateParticles(command, duration, odometerCount)
+        self.sensors.resetOdometerCount()
         self.mapRenderer.drawMap()
         self.mapRenderer.drawParticles()
         self.mapRenderer.showMap()
@@ -582,11 +736,12 @@ class Toddler:
     def particleFilterControl(self):        
         #self.motorBoard.turnLeft()
         #time.sleep(motorFullTurnTime / 10)
-        self.motorBoard.moveForward()
-        time.sleep(1)
+        self.motorBoard.turnLeft()
+        self.sleepUpdate(5)
+        
         duration = self.motorBoard.getDuration()
         self.motorBoard.stopMoving()
-        self.executeCommand('forward', duration)
+        self.executeCommand('turn_left', duration)
         #print("IR Readings: " + str(measurements['leftIR']) + ", " + str(measurements['rightIR']))
 
         
@@ -634,36 +789,42 @@ class Toddler:
         self.motorBoard.stopMoving()
         time.sleep(5)
 
-
+    def sleepUpdate(self, duration):
+        start = time.time()
+        while time.time() - start < duration:
+            time.sleep(0.05)
+            #self.sensors.update()
+        time.sleep(0.05)
+    
     def avoidLeft(self, rnd):
         duration = self.motorBoard.stopMoving()
         self.executeCommand('forward', duration)
-        time.sleep(0.02)
+        self.sleepUpdate(0.02)
         self.motorBoard.turnLeft()
-        time.sleep(rnd)
+        self.sleepUpdate(rnd)
         duration = self.motorBoard.stopMoving()
         self.executeCommand('turn_left', duration)
 
     def avoidRight(self, rnd):
         duration = self.motorBoard.stopMoving()
         self.executeCommand('forward', duration)
-        time.sleep(0.02)
+        self.sleepUpdate(0.02)
         self.motorBoard.turnRight()
-        time.sleep(rnd)
+        self.sleepUpdate(rnd)
         duration = self.motorBoard.stopMoving()
         self.executeCommand('turn_right', duration)
 
     def avoidBack(self, rnd):
         duration = self.motorBoard.stopMoving()
         self.executeCommand('forward', duration)
-        time.sleep(0.02)
+        self.sleepUpdate(0.02)
         self.motorBoard.moveForward(backwards=True)
-        time.sleep(0.8)
+        self.sleepUpdate(0.8)
         duration = self.motorBoard.stopMoving()
         self.executeCommand('backwards', duration)
-        time.sleep(0.25)
+        self.sleepUpdate(0.25)
         self.motorBoard.turnLeft()
-        time.sleep(rnd)
+        self.sleepUpdate(rnd)
         duration = self.motorBoard.stopMoving()
         self.executeCommand('turn_left', duration)
 
@@ -675,6 +836,7 @@ class Toddler:
         rightIR = self.sensors.getIRSensorRight() 
         whiskerLeft = self.sensors.getWhiskerLeft()
         whiskerRight = self.sensors.getWhiskerRight()
+        #self.sensors.update()
         
         lightUpperThreshold = 56.5
         lightLowerThreshold = 19
@@ -705,6 +867,14 @@ class Toddler:
         elif self.motorBoard.getDuration() > 2:
             duration = self.motorBoard.stopMoving()
             self.executeCommand('forward', duration)
+            #self.motorBoard.turnLeft()
+            #self.sleepUpdate(1.5)
+            #duration = self.motorBoard.stopMoving()
+            #self.executeCommand('turn_left', duration)
+            #self.motorBoard.turnRight()
+            #self.sleepUpdate(1.5)
+            #duration = self.motorBoard.stopMoving()
+            #self.executeCommand('turn_right', duration)
         else:
             self.motorBoard.moveForward()
             
@@ -712,7 +882,8 @@ class Toddler:
             
     
     def vision(self):
-        time.sleep(0.1)
+        self.sensors.update()
+        time.sleep(0.05)
         #image = self.camera.getFrame()
         #self.camera.imshow('Camera', image)
 
@@ -733,13 +904,13 @@ def lineSegmentCollision(p1, p2, p3, p4):
     t_den = (p4[0] - p3[0])*(p1[1] - p2[1]) - (p1[0] - p2[0])*(p4[1] - p3[1])
     
     if t_den == 0:
-        return False
+        return None
     
     t_a = t_a_num / t_den
     t_b = t_b_num / t_den
     
     if t_a < 0 or t_a > 1 or t_b < 0 or t_b > 1:
-        return False
+        return None
     
     intersection_point = (p1[0] + t_a * (p2[0] - p1[0]), p1[1] + t_a * (p2[1] - p1[1]))
     return intersection_point
@@ -762,6 +933,40 @@ def convertToRightIRReading(distance):
         distanceVec = np.array([np.power(distance, -i) for i in range(5)])
         return np.dot(rightCoefficients, distanceVec)
     
+    
+def convertToSonarReading(distance):
+    if distance < 0.3:
+        return 20
+    else:
+        coefficients = [-5.5181781, 73.862337]
+        distanceVec = np.array([1, distance])
+        return np.dot(coefficients, distanceVec)
+    
+        
+    
+def computeLeftIRPositionAndOrientationVector(particle):
+    
+    leftIRGlobalPosition = particle.pos + computeOrientationVector(particle.orient, referenceVec=leftIRSensorLocalPosition)
+    leftIROrientVector = computeOrientationVector((particle.orient + leftIRSensorAngleOffset) % 360)
+    
+    return leftIRGlobalPosition, leftIROrientVector
+
+def computeRightIRPositionAndOrientationVector(particle):
+    
+    rightIRGlobalPosition = particle.pos + computeOrientationVector(particle.orient, referenceVec=rightIRSensorLocalPosition)
+    rightIROrientVector = computeOrientationVector((particle.orient + rightIRSensorAngleOffset) % 360)
+    
+    return rightIRGlobalPosition, rightIROrientVector
+
+def computeSonarPositionAndOrientVectors(particle):
+    
+    sonarGlobalPosition = particle.pos + computeOrientationVector(particle.orient, referenceVec=sonarSensorLocalPosition)
+    sonarOrientVector = computeOrientationVector(particle.orient)
+    sonarLeftOrientVector = computeOrientationVector((particle.orient - sonarConeAngle) % 360)
+    sonarRightOrientVector = computeOrientationVector((particle.orient + sonarConeAngle) % 360)
+    
+    return sonarGlobalPosition, sonarOrientVector, sonarLeftOrientVector, sonarRightOrientVector
+
 def gaussian(mu, sigma, x):        
     # Given a x position, mean mu and std sigma of Gaussian, calculates the probability
     # Note
@@ -816,8 +1021,17 @@ class MapRenderer:
             orientVec[1] = -orientVec[1]
 
             cv2.line(self.img, (particleImgX, particleImgY), (particleImgX + int(orientVec[0]), particleImgY + int(orientVec[1])), (14,180,40), 2)
-            #print(particle.orient)
             
+            
+            '''leftIRPosition, leftIROrientationVector = computeLeftIRPositionAndOrientationVector(particle)
+            leftIRImgX = int(self.scale * (leftIRPosition[0] + self.padding))
+            leftIRImgY = self.imgHeight - int(self.scale * (leftIRPosition[1] + self.padding))
+            cv2.circle(self.img, (leftIRImgX, leftIRImgY), 4, (0, 255, 0), thickness=-1)
+            
+            rightIRPosition, rightIROrientationVector = computeRightIRPositionAndOrientationVector(particle)
+            rightIRImgX = int(self.scale * (rightIRPosition[0] + self.padding))
+            rightIRImgY = self.imgHeight - int(self.scale * (rightIRPosition[1] + self.padding))
+            cv2.circle(self.img, (rightIRImgX, rightIRImgY), 4, (0, 255, 0), thickness=-1)'''
         
         bestParticle = self.particleFilter.particles[np.argmax(weights)]
         
