@@ -13,19 +13,25 @@ import numpy as np
 from copy import copy
 import cv2
 
+angularSpeed = 0
+motorSpeed = 0
+
+initalTurnTimeDiff = 0.441819
+initialForwardTimeDiff = 0.22779955863952636
+
 # UPDATE THESE BASED ON EXPERIMENTS
 #motorFullTurnTime = 7.0
-motorFullTurnTime = 9.0
-odometerFullTurnCount = 12.0
+#motorFullTurnTime = 5.4
+odometerAngularSpeed = 360 / 15.0
 #motorSpeed = 0.19
-motorSpeed = 0.25
-odometerSpeed = 3.0 / 59.0
+#motorSpeed = 0.25
+odometerSpeed = 3.0 / 59.2
 
 #motorTurnNoise = 70
-motorTurnNoise = 25
-motorTurnPositionNoise = 0.01
-motorForwardNoise = 0.05
-motorDriftNoise = 0.0001
+motorTurnNoise = 10
+motorTurnPositionNoise = 0.05
+motorForwardNoise = 0.01
+motorDriftNoise = 6
 
 robotWidth = 0.25
 robotLength = 0.32
@@ -90,11 +96,22 @@ class SensorManager:
         self.inputReadings = self.getInputs()
         self.odometerCount = 0
         self.oldOdometer = self.getOdometer()
+        
+        self.lastUpdateTime = None
+        self.forwardTimeDifferences = [initialForwardTimeDiff]
+        self.turnTimeDifferences = [initalTurnTimeDiff]
+        
     
-    def update(self):        
+    def updateOdometer(self, command):   
         if self.getOdometer() and not self.oldOdometer:
+            if self.lastUpdateTime != None:    
+                timeDifference = time.time() - self.lastUpdateTime
+                if command == 'forward':
+                    self.forwardTimeDifferences += [timeDifference]
+                elif command == 'turn_left' or command == 'turn_right':
+                    self.turnTimeDifferences += [timeDifference]
             self.odometerCount += 1
-            #print(self.odometerCount)
+            self.lastUpdateTime = time.time()
             
         self.oldOdometer = self.getOdometer()
         
@@ -147,6 +164,15 @@ class SensorManager:
 
     def resetOdometerCount(self):
         self.odometerCount = 0
+        self.lastUpdateTime = None
+    
+    def getAverageForwardTimeDifference(self):
+        print("Forward", self.forwardTimeDifferences)
+        return np.median(self.forwardTimeDifferences)
+    
+    def getAverageTurnTimeDifference(self):
+        print("Turning", self.turnTimeDifferences)
+        return np.median(self.turnTimeDifferences)
     
 class MotorBoardManager:
     
@@ -155,6 +181,7 @@ class MotorBoardManager:
         self.motorControl = motor_control
         self.motorsEngaged = False
         self.motorStartTime = -1
+        self.currentCommand = None
         
     def turnLightOn(self):
         lightLocation = self.motorBoardLocations.getLight()
@@ -165,9 +192,11 @@ class MotorBoardManager:
         self.motorControl.setMotor(lightLocation, 0)
         
     def turnLeft(self, speed=100):
+        self.currentCommand = 'turn_left'
         self.turn(speed, isLeft=True)
     
     def turnRight(self, speed=100):
+        self.currentCommand = 'turn_right'
         self.turn(speed, isLeft=False)
     
     '''Use turnLeft and turnRight instead'''
@@ -182,6 +211,7 @@ class MotorBoardManager:
         self.motorControl.setMotor(rightMotor, (1 if isLeft else -1) * speed)
         
     def moveForward(self, speed=100, backwards=False):
+        self.currentCommand = 'backwards' if backwards else 'forward'
         if self.motorsEngaged:
             #print("Attempted to move forward but the motor was already engaged")
             return
@@ -198,7 +228,7 @@ class MotorBoardManager:
         rightMotor = self.motorBoardLocations.getRightMotor()
         self.motorControl.stopMotor(leftMotor)
         self.motorControl.stopMotor(rightMotor)
-        return duration
+        return duration, self.currentCommand
         
     def stopAll(self):
         self.setEngaged(False)
@@ -332,24 +362,20 @@ class ArenaMap:
         return frontCollide or backCollide or leftCollide or rightCollide
 
 class Particle:
-
-    def __init__(self, arenaMap, pos, orient):
+    
+    def __init__(self, arenaMap, pos, orient, toddler):
         self.arenaMap = arenaMap
         self.pos = pos
         self.orient = orient
+        self.toddler = toddler
         
         self.weight = 0
 
-    def moveForward(self, duration, odometerCount, backwards=False):
+    def moveForward(self, duration, backwards=False):
         orientVec = computeOrientationVector(self.orient)
         
-        
-        if duration < 2:
-            distanceMoved = motorSpeed * duration
-        else:    
-            distanceMoved = odometerCount * odometerSpeed
-        
-        
+        distanceMoved = self.toddler.motorSpeed * duration
+
         forwardNoise =  distanceMoved * orientVec * np.random.normal(0, motorForwardNoise)
         
         #print(noise)
@@ -365,16 +391,14 @@ class Particle:
         #print(self.orient)
         #print("After: " + str(self.pos))
 
-    def moveBackwards(self, duration, odometerCount):
-        self.moveForward(duration, odometerCount, backwards=True)
+    def moveBackwards(self, duration):
+        self.moveForward(duration, backwards=True)
 
-    def turn(self, duration, odometerCount, isLeft):
+    def turn(self, duration, isLeft):
         #print("BEFORE: " + str(self.orient))
         
-        if duration < 2:
-            turns = duration / motorFullTurnTime        
-        else:
-            turns = odometerCount / odometerFullTurnCount
+        print(self.toddler.angularSpeed)
+        turns = self.toddler.angularSpeed * duration / 360.0     
         
         #self.orient += (-1 if isLeft else 1) * duration / motorFullTurnTime * 360 + turns * np.random.normal(0, motorTurnNoise)
         self.orient += (-1 if isLeft else 1) * turns * 360 + turns * np.random.normal(0, motorTurnNoise)
@@ -385,11 +409,11 @@ class Particle:
         self.pos = (newX, newY)
         #print("AFTER: " + str(self.orient))
 
-    def turnLeft(self, duration, odometerCount):
-        self.turn(duration, odometerCount, isLeft=True)
+    def turnLeft(self, duration):
+        self.turn(duration, isLeft=True)
 
-    def turnRight(self, duration, odometerCount):
-        self.turn(duration, odometerCount, isLeft=False)
+    def turnRight(self, duration):
+        self.turn(duration, isLeft=False)
         
     def senseLeftIR(self):
 
@@ -440,13 +464,13 @@ class Particle:
 
 class ParticleFilter:
 
-    def __init__(self, arenaMap, num_particles):
+    def __init__(self, arenaMap, num_particles, toddler):
         
         self.arenaMap = arenaMap 
         self.particles = []
         while len(self.particles) < num_particles:
-            #x = np.random.uniform(arenaMap.bounds_rect[0][0], arenaMap.bounds_rect[1][0])
-            #y = np.random.uniform(arenaMap.bounds_rect[0][1], arenaMap.bounds_rect[1][1])
+            x = np.random.uniform(arenaMap.bounds_rect[0][0], arenaMap.bounds_rect[1][0])
+            y = np.random.uniform(arenaMap.bounds_rect[0][1], arenaMap.bounds_rect[1][1])
             
             #x = np.random.uniform(1.275, 1.525)
             #y = np.random.uniform(0.285, 0.535)
@@ -454,26 +478,27 @@ class ParticleFilter:
             #x = 3.06 + np.random.uniform(0.05, 0.05)
             #y = 0.44 + np.random.uniform(-0.05, 0.05)
             
-            x = 1.0 + np.random.uniform(0.05, 0.05)
-            y = 1.58 + np.random.uniform(-0.05, 0.05)
+            #x = 1.43 + np.random.uniform(-0.05, 0.05)
+            #y = 0.40 + np.random.uniform(-0.05, 0.05)
             
-            orient = (90 + np.random.uniform(-5, 5)) % 360
+            orient = (0 + np.random.uniform(0, 360)) % 360
 
             if arenaMap.checkInsideMap((x, y)):
-                self.particles += [Particle(arenaMap, (x, y), orient)]
+                self.particles += [Particle(arenaMap, (x, y), orient, toddler=toddler)]
 
-    def updateParticles(self, command, duration, odometerCount):
+    def updateParticles(self, command, duration):
         if not (command in ['forward', 'backwards', 'turn_left', 'turn_right']):
             return
         for particle in self.particles:
             if command == 'forward':
-                particle.moveForward(duration, odometerCount)
+                particle.moveForward(duration)
             elif command == 'backwards':
-                particle.moveBackwards(duration, odometerCount)
+                particle.moveBackwards(duration)
             elif command == 'turn_left':
-                particle.turnLeft(duration, odometerCount)
+                #print("turning left")
+                particle.turnLeft(duration)
             elif command == 'turn_right':
-                particle.turnRight(duration, odometerCount)
+                particle.turnRight(duration)
 
     def measurementProb(self, particle, measurements):
         leftIRReading = measurements['leftIR']
@@ -483,21 +508,20 @@ class ParticleFilter:
         particleLeftIRDistance = particle.senseLeftIR()
         particleLeftIRReading = convertToLeftIRReading(particleLeftIRDistance)
 
-        leftIRNoiseStd = self.computeIRNoise(particleLeftIRDistance) * 3
+        leftIRNoiseStd = self.computeIRNoise(particleLeftIRDistance) * 2
         leftProb = gaussian(particleLeftIRReading, leftIRNoiseStd, leftIRReading)
 
 
-        particleRightIRDistance = particle.senseRightIR()        
+        particleRightIRDistance = particle.senseRightIR()
         particleRightIRReading = convertToRightIRReading(particleRightIRDistance)
         
-        rightIRNoiseStd = self.computeIRNoise(particleRightIRDistance)* 3
+        rightIRNoiseStd = self.computeIRNoise(particleRightIRDistance) * 2
         rightProb = gaussian(particleRightIRReading, rightIRNoiseStd, rightIRReading)
         
-    
         particleSonarDistance = particle.senseSonar()
         particleSonarReading = convertToSonarReading(particleSonarDistance)
         
-        sonarNoiseStd = 30
+        sonarNoiseStd = 30 * 2
         sonarProb = gaussian(particleSonarReading, sonarNoiseStd, sonarReading)
         
         #collided = self.arenaMap.checkRobotCollision(particle.pos, particle.orient)
@@ -540,7 +564,8 @@ class ParticleFilter:
         print(total)
         for particle in self.particles:
             particle.weight /= total
-            
+        
+        
         weights = [particle.weight for particle in self.particles]
         # Resample Particles
         newParticles = []
@@ -597,10 +622,12 @@ class Toddler:
             self.currentOrient = 0
         '''
         self.arenaMap = ArenaMap()
-        self.particleFilter = ParticleFilter(self.arenaMap, 300)
+        self.particleFilter = ParticleFilter(self.arenaMap, 1000, toddler=self)
         self.mapRenderer = MapRenderer(self.arenaMap, self.particleFilter)
         self.counter = 0
-            
+        
+        self.motorSpeed = 0
+        self.angularSpeed = 0
     
     def computeHeadingAndServoRotation(self):
         targetDirection = self.currentPos - self.satellitePos
@@ -663,7 +690,7 @@ class Toddler:
         odometerCount = self.sensors.getOdometerCount()
         #while odometerCount < 58:
         while odometerCount < 12:
-            self.sensors.update()
+            self.sensors.updateOdometer()
             odometerCount = self.sensors.getOdometerCount()
             print(odometerCount)
         #time.sleep(0.05)
@@ -699,18 +726,46 @@ class Toddler:
             time.sleep(0.05)
         print(np.mean(readings))
     
+    
     def moveForwardControl(self):
+        duration = 6
         self.motorBoard.moveForward()
-        time.sleep(10)
+        time.sleep(duration)
         self.motorBoard.stopMoving()
+        
+        averageTimeDifference = self.sensors.getAverageForwardTimeDifference()
+        
+        speedEstimate = odometerSpeed / averageTimeDifference
+        #angularSpeedEstimate = odometerAngularSpeed / averageTimeDifference
+        
+        distanceEstimate = speedEstimate * duration
+        #angleEstimate = angularSpeedEstimate * duration
+        
+        print(self.sensors.getOdometerCount())
+        print("Average Time Diff", averageTimeDifference)
+        print("Speed", speedEstimate)
+        print("Distance", distanceEstimate)
+        #print("Angular Speed", angularSpeedEstimate)
+        #print("Angle", angleEstimate)
+        
         time.sleep(10)
     
     def fullTurnControl(self):
-        self.motorBoard.turnLeft()
-        time.sleep(motorFullTurnTime)
+        self.motorBoard.moveForward()
+        startTime = time.time()
+        while self.sensors.getOdometerCount() <= 36:
+            time.sleep(0.05)
+        duration = time.time() - startTime
+        self.sensors.resetOdometerCount()
+        #self.sleepUpdate(motorFullTurnTime)
         self.motorBoard.stopMoving()
         time.sleep(3)
+        self.motorBoard.turnRight()
+        self.sleepUpdate(duration / 3.0)
+        self.motorBoard.stopMoving()
         
+    
+    
     def executeCommand(self, command, duration):
         
         leftIRReadings = []
@@ -725,9 +780,8 @@ class Toddler:
         
         measurements = {'leftIR': np.mean(leftIRReadings), 'rightIR': np.mean(rightIRReadings), 'sonar': sonarReading}    
         self.particleFilter.resampleParticles(measurements)
-        odometerCount = self.sensors.getOdometerCount()
-        print(odometerCount)
-        self.particleFilter.updateParticles(command, duration, odometerCount)
+        
+        self.particleFilter.updateParticles(command, duration)
         self.sensors.resetOdometerCount()
         self.mapRenderer.drawMap()
         self.mapRenderer.drawParticles()
@@ -740,8 +794,8 @@ class Toddler:
         self.sleepUpdate(5)
         
         duration = self.motorBoard.getDuration()
-        self.motorBoard.stopMoving()
-        self.executeCommand('turn_left', duration)
+        duration, command = self.motorBoard.stopMoving()
+        self.executeCommand(command, duration)
         #print("IR Readings: " + str(measurements['leftIR']) + ", " + str(measurements['rightIR']))
 
         
@@ -797,38 +851,58 @@ class Toddler:
         time.sleep(0.05)
     
     def avoidLeft(self, rnd):
-        duration = self.motorBoard.stopMoving()
-        self.executeCommand('forward', duration)
+        duration, command = self.motorBoard.stopMoving()
+        self.sensors.resetOdometerCount()
+        self.executeCommand(command, duration)
         self.sleepUpdate(0.02)
         self.motorBoard.turnLeft()
         self.sleepUpdate(rnd)
-        duration = self.motorBoard.stopMoving()
-        self.executeCommand('turn_left', duration)
+        duration, command = self.motorBoard.stopMoving()
+        self.sensors.resetOdometerCount()
+        self.executeCommand(command, duration)
 
     def avoidRight(self, rnd):
-        duration = self.motorBoard.stopMoving()
-        self.executeCommand('forward', duration)
+        duration, command = self.motorBoard.stopMoving()
+        self.sensors.resetOdometerCount()
+        self.executeCommand(command, duration)
         self.sleepUpdate(0.02)
         self.motorBoard.turnRight()
         self.sleepUpdate(rnd)
-        duration = self.motorBoard.stopMoving()
-        self.executeCommand('turn_right', duration)
+        duration, command = self.motorBoard.stopMoving()
+        self.sensors.resetOdometerCount()
+        self.executeCommand(command, duration)
 
     def avoidBack(self, rnd):
-        duration = self.motorBoard.stopMoving()
-        self.executeCommand('forward', duration)
+        duration, command = self.motorBoard.stopMoving()
+        self.sensors.resetOdometerCount()
+        self.executeCommand(command, duration)
         self.sleepUpdate(0.02)
         self.motorBoard.moveForward(backwards=True)
         self.sleepUpdate(0.8)
-        duration = self.motorBoard.stopMoving()
-        self.executeCommand('backwards', duration)
+        duration, command = self.motorBoard.stopMoving()
+        self.sensors.resetOdometerCount()
+        self.executeCommand(command, duration)
         self.sleepUpdate(0.25)
         self.motorBoard.turnLeft()
         self.sleepUpdate(rnd)
-        duration = self.motorBoard.stopMoving()
-        self.executeCommand('turn_left', duration)
+        duration, command = self.motorBoard.stopMoving()
+        self.sensors.resetOdometerCount()
+        self.executeCommand(command, duration)
+
+    def updateSpeedEstimates(self):
+        
+        averageForwardTimeDifference = self.sensors.getAverageForwardTimeDifference()
+        averageTurnTimeDifference = self.sensors.getAverageTurnTimeDifference()
+        
+        self.motorSpeed = odometerSpeed / averageForwardTimeDifference
+        self.angularSpeed = odometerAngularSpeed / averageTurnTimeDifference
+        
+        print("Motor Speed", self.motorSpeed)
+        print("Angular Speed", self.angularSpeed)
 
     def collisionAvoidanceControl(self, stopOnPOI=True):
+        
+        self.updateSpeedEstimates()
         
         irThreshold = 400
         
@@ -862,11 +936,12 @@ class Toddler:
             self.avoidLeft(rnd)
         elif leftIR > irThreshold and rightIR > irThreshold:
             self.avoidBack(rnd)
-        elif self.sensors.getSonar() < 20:
+        elif self.sensors.getSonar() < 23:
             self.avoidBack(rnd)
         elif self.motorBoard.getDuration() > 2:
-            duration = self.motorBoard.stopMoving()
-            self.executeCommand('forward', duration)
+            duration, command = self.motorBoard.stopMoving()
+            self.sensors.resetOdometerCount()
+            self.executeCommand(command, duration)
             #self.motorBoard.turnLeft()
             #self.sleepUpdate(1.5)
             #duration = self.motorBoard.stopMoving()
@@ -882,8 +957,9 @@ class Toddler:
             
     
     def vision(self):
-        self.sensors.update()
-        time.sleep(0.05)
+    
+        self.sensors.updateOdometer(self.motorBoard.currentCommand)
+        time.sleep(0.002)
         #image = self.camera.getFrame()
         #self.camera.imshow('Camera', image)
 
