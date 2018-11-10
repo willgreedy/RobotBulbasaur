@@ -375,19 +375,38 @@ class Particle:
         orientVec = computeOrientationVector(self.orient)
         
         distanceMoved = self.toddler.motorSpeed * duration
-
         forwardNoise =  distanceMoved * orientVec * np.random.normal(0, motorForwardNoise)
+        positionChangeVector = (-1 if backwards else 1) * distanceMoved * orientVec + forwardNoise
         
-        #print(noise)
-        #print("Prev: "+ str(self.pos))
-        newX = self.pos[0] + (-1 if backwards else 1) * orientVec[0] * distanceMoved + forwardNoise[0]
-        newY = self.pos[1] + (-1 if backwards else 1) * orientVec[1] * distanceMoved + forwardNoise[1]
-        self.pos = (newX, newY)
-        
-        #print(self.orient)
         driftNoise = distanceMoved * np.random.normal(0, motorDriftNoise)
-        self.orient += driftNoise
-        self.orient %= 360
+        newOrient = (self.orient + driftNoise) % 360
+        
+        factor = 1.0
+        
+        newPositionChangeVector = positionChangeVector
+        
+        loops = 4
+        # Binary search 4 times
+        for i in range(loops):
+            newPositionChangeVector = positionChangeVector * factor
+            #forwardNoise =  distanceMoved * orientVec * np.random.normal(0, motorForwardNoise)
+        
+            #print(noise)
+            #print("Prev: "+ str(self.pos))
+            newX = self.pos[0] + newPositionChangeVector[0]
+            newY = self.pos[1] + newPositionChangeVector[1]
+
+            newPos = (newX, newY)
+            
+            if self.arenaMap.checkRobotCollision(newPos, newOrient):
+                factor /= 2.0
+                if i == loops - 1:
+                    newPos = self.pos
+            else:
+                break
+        
+        self.pos = newPos
+        self.orient = newOrient
         #print(self.orient)
         #print("After: " + str(self.pos))
 
@@ -401,12 +420,15 @@ class Particle:
         turns = self.toddler.angularSpeed * duration / 360.0     
         
         #self.orient += (-1 if isLeft else 1) * duration / motorFullTurnTime * 360 + turns * np.random.normal(0, motorTurnNoise)
-        self.orient += (-1 if isLeft else 1) * turns * 360 + turns * np.random.normal(0, motorTurnNoise)
-        self.orient %= 360
+        newOrient = (self.orient + (-1 if isLeft else 1) * turns * 360 + turns * np.random.normal(0, motorTurnNoise)) % 360
         
         newX = self.pos[0] + turns * np.random.normal(0, motorTurnPositionNoise)
         newY = self.pos[1] + turns * np.random.normal(0, motorTurnPositionNoise)
-        self.pos = (newX, newY)
+        newPos = (newX, newY)
+        
+        
+        self.orient = newOrient
+        self.pos = newPos
         #print("AFTER: " + str(self.orient))
 
     def turnLeft(self, duration):
