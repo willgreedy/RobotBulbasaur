@@ -10,7 +10,7 @@ Created on Thu Oct 11 11:25:29 2018
 
 import time
 import numpy as np
-from copy import copy
+from copy import copy, deepcopy
 import cv2
 
 angularSpeed = 0
@@ -338,7 +338,7 @@ class ArenaMap:
     def checkInsideMap(self, p):
         #inBounds = p[0] < self.bounds_rect[1][0] and p[0] > self.bounds_rect[0][0] and p[1] < self.bounds_rect[1][1] and p[1] > self.bounds_rect[1][0]
         #inCorner = p0
-                self.bounds_rect = [(0, 0), (3.2, 4.25)]
+        self.bounds_rect = [(0, 0), (3.2, 4.25)]
         #self.obstacles = [outer_wall, tri_obstacle, rect_obstacle]          
         poly=self.obstacles[0]
         x=p[0]
@@ -360,8 +360,8 @@ class ArenaMap:
         #return True
     
     def checkRobotCollision(self, pos, orient):
-        forward = computeOrientationVector(orient) * robotLength / 2
-        right = computeOrientationVector((orient + 90) % 360) * robotWidth / 2
+        forward = computeOrientationVector(orient) * robotLength / 2.0
+        right = computeOrientationVector((orient + 90) % 360) * robotWidth / 2.0
         
         #print(forward)
         #print(right)
@@ -371,14 +371,17 @@ class ArenaMap:
         backLeft = np.array(pos) - forward - right
         backRight = np.array(pos) - forward + right
         
-        frontCollide = self.checkCollision(frontLeft, frontRight)
+        #print(frontLeft, frontRight, backLeft, backRight)
+        
+        
+        frontCollide =  self.checkCollision(frontLeft, frontRight)
         rightCollide = self.checkCollision(frontRight, backRight)
         backCollide = self.checkCollision(backRight, backLeft)
         leftCollide = self.checkCollision(backLeft, frontLeft)
         
         #print([frontCollide, rightCollide, backCollide, leftCollide])
         
-        return frontCollide or backCollide or leftCollide or rightCollide
+        return frontCollide or rightCollide or backCollide or leftCollide
 
 class Particle:
     
@@ -435,7 +438,7 @@ class Particle:
     def turn(self, duration, isLeft):
         #print("BEFORE: " + str(self.orient))
         
-        print(self.toddler.angularSpeed)
+        #print(self.toddler.angularSpeed)
         turns = self.toddler.angularSpeed * duration / 360.0     
         
         #self.orient += (-1 if isLeft else 1) * duration / motorFullTurnTime * 360 + turns * np.random.normal(0, motorTurnNoise)
@@ -505,28 +508,38 @@ class Particle:
 
 class ParticleFilter:
 
-    def __init__(self, arenaMap, num_particles, toddler):
+    def __init__(self, arenaMap, num_particles, POIGrid, toddler):
         
         self.arenaMap = arenaMap 
+        self.POIGrid = POIGrid
         self.particles = []
         while len(self.particles) < num_particles:
-            x = np.random.uniform(arenaMap.bounds_rect[0][0], arenaMap.bounds_rect[1][0])
-            y = np.random.uniform(arenaMap.bounds_rect[0][1], arenaMap.bounds_rect[1][1])
             
-            #x = np.random.uniform(1.275, 1.525)
-            #y = np.random.uniform(0.285, 0.535)
-        
-            #x = 3.06 + np.random.uniform(0.05, 0.05)
-            #y = 0.44 + np.random.uniform(-0.05, 0.05)
+            #x = np.random.uniform(arenaMap.bounds_rect[0][0], arenaMap.bounds_rect[1][0])
+            #y = np.random.uniform(arenaMap.bounds_rect[0][1], arenaMap.bounds_rect[1][1])
             
-            #x = 1.43 + np.random.uniform(-0.05, 0.05)
-            #y = 0.40 + np.random.uniform(-0.05, 0.05)
+            x, y, orient = self.generateStartPoint(1.43, 0.40, 1.1, 1.1, 0, 120)
             
-            orient = (0 + np.random.uniform(0, 360)) % 360
+            #print("test")
+            #print(self.arenaMap.checkRobotCollision((x, y), orient))
+            while not (self.arenaMap.checkInsideMap((x ,y)) and (not self.arenaMap.checkRobotCollision((x, y), orient))):
+                #print("test")
+                x, y, orient = self.generateStartPoint(1.43, 0.40, 0.1, 0.1, 0, 4)
+                #x = np.random.uniform(arenaMap.bounds_rect[0][0], arenaMap.bounds_rect[1][0])
+                #y = np.random.uniform(arenaMap.bounds_rect[0][1], arenaMap.bounds_rect[1][1])
+
+            
 
             if arenaMap.checkInsideMap((x, y)):
                 self.particles += [Particle(arenaMap, (x, y), orient, toddler=toddler)]
-
+                
+    def generateStartPoint(self, xPos, yPos, xRange, yRange, orientation, orientRange):
+        x = xPos + np.random.uniform(-xRange/2.0, xRange/2.0)
+        y = yPos + np.random.uniform(-yRange/2.0, yRange/2.0)
+        
+        orient = (orientation + np.random.uniform(-orientRange/2.0, orientRange/2.0)) % 360
+        return x, y, orient
+                
     def updateParticles(self, command, duration):
         if not (command in ['forward', 'backwards', 'turn_left', 'turn_right']):
             return
@@ -549,14 +562,14 @@ class ParticleFilter:
         particleLeftIRDistance = particle.senseLeftIR()
         particleLeftIRReading = convertToLeftIRReading(particleLeftIRDistance)
 
-        leftIRNoiseStd = self.computeIRNoise(particleLeftIRDistance) * 2
+        leftIRNoiseStd = self.computeIRNoise(particleLeftIRDistance)
         leftProb = gaussian(particleLeftIRReading, leftIRNoiseStd, leftIRReading)
 
 
         particleRightIRDistance = particle.senseRightIR()
         particleRightIRReading = convertToRightIRReading(particleRightIRDistance)
         
-        rightIRNoiseStd = self.computeIRNoise(particleRightIRDistance) * 2
+        rightIRNoiseStd = self.computeIRNoise(particleRightIRDistance)
         rightProb = gaussian(particleRightIRReading, rightIRNoiseStd, rightIRReading)
         
         particleSonarDistance = particle.senseSonar()
@@ -578,9 +591,9 @@ class ParticleFilter:
         return prob
     
     def computeIRNoise(self, distance):
-        closeIRNoiseStd = 100
-        normalIRNoiseStd = 20
-        maxIRNoiseStd = 50
+        closeIRNoiseStd = 150
+        normalIRNoiseStd = 25
+        maxIRNoiseStd = 75
 
         maxAccurateRange = 1.0
         
@@ -605,7 +618,9 @@ class ParticleFilter:
         print(total)
         for particle in self.particles:
             particle.weight /= total
-        
+            
+            # Update grid map
+            self.POIGrid.update(particle.pos, particle.weight, measurements['light'])
         
         weights = [particle.weight for particle in self.particles]
         # Resample Particles
@@ -626,6 +641,52 @@ class ParticleFilter:
             newParticles.append(selectedParticle)
         
         self.particles = newParticles
+
+class POIGrid:
+    
+    def __init__(self, gridWidth, gridHeight, arenaMap):
+        self.gridHeight = gridHeight
+        self.gridWidth = gridWidth
+        
+        self.cellWidth = 3.22 / self.gridWidth
+        self.cellHeight = 4.27 / self.gridHeight
+        
+        self.arenaMap = arenaMap
+        
+        self.grid = np.zeros((self.gridWidth, self.gridHeight))
+        self.initGrid()
+        
+    def initGrid(self):
+        for gridX in range(self.gridWidth):
+            for gridY in range(self.gridHeight):
+                centerPos = self.getCenterPos(gridX, gridY)
+                if self.arenaMap.checkInsideMap(centerPos) and not self.arenaMap.checkRobotCollision(centerPos, 0):
+                    self.grid[gridX][gridY] = 1.0
+                else:
+                    self.grid[gridX][gridY] = 0.0
+        
+    def getCenterPos(self, gridX, gridY):
+        x = self.cellWidth * (gridX + 0.5)
+        y = self.cellHeight * (gridY + 0.5)
+        return x, y
+                
+    def update(self, pos, likelihood, POIdetected):
+        gridX = int(pos[0] / self.cellWidth)
+        gridY = int(pos[1] / self.cellHeight)
+        if POIdetected:
+            self.grid[gridX][gridY] += likelihood
+        else:
+            self.grid[gridX][gridY] -= likelihood
+
+    def getCellWidth(self):
+        return self.cellWidth
+        
+    def getCellHeight(self):
+        return self.cellHeight
+        
+    def getLikelihood(self, gridX, gridY):
+        return self.grid[gridX, gridY]
+        
 
 class Toddler:
     __version = '2018a'
@@ -663,12 +724,18 @@ class Toddler:
             self.currentOrient = 0
         '''
         self.arenaMap = ArenaMap()
-        self.particleFilter = ParticleFilter(self.arenaMap, 1000, toddler=self)
-        self.mapRenderer = MapRenderer(self.arenaMap, self.particleFilter)
+        self.POIGrid = POIGrid(25, 33, self.arenaMap)
+        self.particleFilter = ParticleFilter(self.arenaMap, 500, self.POIGrid, toddler=self)
+        self.mapRenderer = MapRenderer(self.arenaMap, self.particleFilter, self.POIGrid)
+        
         self.counter = 0
         
         self.motorSpeed = 0
         self.angularSpeed = 0
+        
+        self.mapRenderer.drawMap()
+        self.mapRenderer.drawParticles(withWeights=False)
+        self.mapRenderer.showMap()
     
     def computeHeadingAndServoRotation(self):
         targetDirection = self.currentPos - self.satellitePos
@@ -818,8 +885,9 @@ class Toddler:
             time.sleep(0.05)
         
         sonarReading = self.sensors.getSonar()
+        lightReading = self.sensors.getLight()
         
-        measurements = {'leftIR': np.mean(leftIRReadings), 'rightIR': np.mean(rightIRReadings), 'sonar': sonarReading}    
+        measurements = {'leftIR': np.mean(leftIRReadings), 'rightIR': np.mean(rightIRReadings), 'sonar': sonarReading, 'light': lightReading > 62}    
         self.particleFilter.resampleParticles(measurements)
         
         self.particleFilter.updateParticles(command, duration)
@@ -945,6 +1013,8 @@ class Toddler:
         
         self.updateSpeedEstimates()
         
+        self.POIGrid.grid[5][5] = 0.5
+        
         irThreshold = 400
         
         leftIR = self.sensors.getIRSensorLeft() 
@@ -959,7 +1029,7 @@ class Toddler:
         lightSensors = self.sensors.getLightSensors()
         
         light = lightSensors[0]
-        rnd = 0.5 + 1.5 * np.random.rand()
+        rnd = 1.5 + 0.5 * np.random.rand()
         
         #if light > lightUpperThreshold:# or light < lightLowerThreshold:
         #    print("POI Detected")
@@ -1093,9 +1163,10 @@ def gaussian(mu, sigma, x):
 
 class MapRenderer:
 
-    def __init__(self, arenaMap, particleFilter):
+    def __init__(self, arenaMap, particleFilter, POIGrid):
         self.arenaMap = ArenaMap()
         self.particleFilter = particleFilter
+        self.POIGrid = POIGrid
 
         self.scale = 200
         self.padding = 0.2
@@ -1109,31 +1180,135 @@ class MapRenderer:
         self.img[:] = (255,255,255)
 
 
+    def convertToImgCoords(self, x, y):
+        imgX = int(self.scale * (x + self.padding))
+        imgY = self.imgHeight - int(self.scale * (y + self.padding))
+        
+        return imgX, imgY
+
     def drawMap(self):
         self.img[:] = (255,255,255)
+        self.drawPOIGrid()
         for obstacle in self.arenaMap.obstacles:
             for i in range(len(obstacle)):
                 p1 = obstacle[i]
                 p2 = obstacle[(i+1)%len(obstacle)]
-                p1x = int(self.scale * (p1[0] + self.padding))
-                p1y = self.imgHeight - int(self.scale * (p1[1] + self.padding))
-                p2x = int(self.scale * (p2[0] + self.padding))
-                p2y = self.imgHeight - int(self.scale * (p2[1] + self.padding))
+                #p1x = int(self.scale * (p1[0] + self.padding))
+                #p1y = self.imgHeight - int(self.scale * (p1[1] + self.padding))
+                p1x, p1y = self.convertToImgCoords(p1[0], p1[1])
+                #p2x = int(self.scale * (p2[0] + self.padding))
+                #p2y = self.imgHeight - int(self.scale * (p2[1] + self.padding))
+                p2x, p2y = self.convertToImgCoords(p2[0], p2[1])
                 
                 cv2.line(self.img, (p1x,p1y), (p2x, p2y), (0,0,0), 2)
                 #plt.plot([p1[0], p2[0]], [p1[1], p2[1]], color='k', linestyle='-', linewidth=2)
 
-    def drawParticles(self):
-        weights = [p.weight for p in self.particleFilter.particles]
-        maxWeight = max(weights)
+    def drawPOIGrid(self):
+        cellWidth = self.POIGrid.getCellWidth()
+        cellHeight = self.POIGrid.getCellHeight()
+        for gridX in range(self.POIGrid.gridWidth):
+            for gridY in range(self.POIGrid.gridHeight):
+                likelihood = self.POIGrid.getLikelihood(gridX, gridY)
+                
+                x = gridX * cellWidth
+                y = gridY * cellHeight
+                
+                imgXLower, imgYLower = self.convertToImgCoords(x, y)
+                imgXUpper, imgYUpper = self.convertToImgCoords(x+cellWidth, y+cellHeight)
+                
+                cv2.rectangle(self.img, (imgXLower, imgYLower), (imgXUpper, imgYUpper), (0,100*(1-likelihood),255), -1)
+
+                
+                
+                
+                
+
+    def drawParticles(self, withWeights=True):
+        
+        if withWeights:
+            weights = [p.weight for p in self.particleFilter.particles]
+            maxWeight = max(weights)
+            
+            
+        '''particleLocations = [(p.pos[0], p.pos[1], p.orient) for p in self.particleFilter.particles]
+        k = 3
+        
+        data = np.array(particleLocations)
+        print(data.shape)
+            
+        
+        n = data.shape[0]
+        c = data.shape[1]
+            
+        mean = np.mean(data, axis = 0)
+        std = np.std(data, axis = 0)
+        centroids = np.random.randn(k,c)*std + mean
+        
+        centroidsOld = np.zeros(centroids.shape)
+        centroidsNew = deepcopy(centroids)
+        
+        def computeDifferenceWithCentroid(data, centroid):
+            #print(data.shape)
+            #print(centroid.shape)
+            posDiff = (data[:, :2] - centroid[:2]) / np.array([3.22, 4.27])
+            orientDiff = np.min([data[:, 2] - centroid[2], data[:, 2] - centroid[2] + 360, data[:, 2] - centroid[2] - 360], axis=0) / 360.0
+            return np.concatenate([posDiff, orientDiff.reshape(-1, 1)], axis=1)
+        
+        clusters = np.zeros(n)
+        distances = np.zeros((n,k))
+        
+        error = np.linalg.norm(centroidsNew - centroidsOld)
+        
+        maxIterations = 50
+        i = 0
+        while error != 0:
+            i =+ 1
+            if i > maxIterations:
+                break
+            # Measure the distance to every centroids
+            for i in range(k):
+                distances[:,i] = np.linalg.norm(computeDifferenceWithCentroid(data, centroids[i]), axis=1)
+                
+                # Assign all training data to closest centroids
+                clusters = np.argmin(distances, axis = 1)
+    
+                centroidsOld = deepcopy(centroidsNew)
+                # Calculate mean for every cluster and update the centroids
+            print(distances)
+            for i in range(k):
+                if data[clusters == i].shape[0] == 0:
+                    centroidsNew[i] = centroidsOld[i]
+                else:    
+                    centroidsNew[i] = np.mean(data[clusters == i], axis=0)
+                error = np.linalg.norm(centroidsNew - centroidsOld)
+            
+        #clusterWeightedPosition = np.zeros(n, k)
+        clusterWeightTotals = np.zeros(k)
+
+        print(clusters)    
+            
+        for i in range(n):
+            assignment = clusters[i]
+            weight = self.particleFilter.particles[i].weight
+            clusterWeightTotals[assignment] += weight
+            
+        bestCluster = np.argmax(clusterWeightTotals)
+        bestClusterPosition = centroidsNew[bestCluster]
+        '''
+            
         #print(weights)
+        #for particle, assignment in zip(self.particleFilter.particles, clusters):
         for particle in self.particleFilter.particles:
             
             particleImgX = int(self.scale * (particle.pos[0] + self.padding))
             particleImgY = self.imgHeight - int(self.scale * (particle.pos[1] + self.padding))
 
 
-            cv2.circle(self.img, (particleImgX, particleImgY), 4, (255,0, 255*particle.weight/maxWeight), thickness=-1)
+            colour = (255,0, 255*particle.weight/maxWeight) if withWeights else (255, 0, 125)
+            #colour = (255*(1-int(assignment)/float(k)),255*int(assignment)/float(k), 255*int(assignment)/float(k))
+            #colour = (255, 255, 0)
+            
+            cv2.circle(self.img, (particleImgX, particleImgY), 4, colour, thickness=-1)
             orientVec = computeOrientationVector(particle.orient) * 15
             orientVec[1] = -orientVec[1]
 
@@ -1150,17 +1325,18 @@ class MapRenderer:
             rightIRImgY = self.imgHeight - int(self.scale * (rightIRPosition[1] + self.padding))
             cv2.circle(self.img, (rightIRImgX, rightIRImgY), 4, (0, 255, 0), thickness=-1)'''
         
-        bestParticle = self.particleFilter.particles[np.argmax(weights)]
-        
-        bestParticleImgX = int(self.scale * (particle.pos[0] + self.padding))
-        bestParticleImgY = self.imgHeight - int(self.scale * (particle.pos[1] + self.padding))
-        
-        
-        cv2.circle(self.img, (bestParticleImgX, bestParticleImgY), 4, (0,0,0), thickness=-1)
-        orientVec = computeOrientationVector(bestParticle.orient) * 30
-        orientVec[1] = -orientVec[1]
-
-        cv2.line(self.img, (bestParticleImgX, bestParticleImgY), (bestParticleImgX + int(orientVec[0]), bestParticleImgY + int(orientVec[1])), (0,0,0), 2)            
+        if withWeights:
+            bestParticle = self.particleFilter.particles[np.argmax(weights)]
+            
+            bestParticleImgX = int(self.scale * (particle.pos[0] + self.padding))
+            bestParticleImgY = self.imgHeight - int(self.scale * (particle.pos[1] + self.padding))
+            
+            
+            cv2.circle(self.img, (bestParticleImgX, bestParticleImgY), 4, (0,0,0), thickness=-1)
+            orientVec = computeOrientationVector(bestParticle.orient) * 30
+            orientVec[1] = -orientVec[1]
+    
+            cv2.line(self.img, (bestParticleImgX, bestParticleImgY), (bestParticleImgX + int(orientVec[0]), bestParticleImgY + int(orientVec[1])), (0,0,0), 2)            
             
 
     def showMap(self):
