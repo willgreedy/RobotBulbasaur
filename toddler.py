@@ -324,7 +324,9 @@ class ArenaMap:
         #                  (0.75, 3.75), (0.75, 3.6), (2.9, 3.6), (2.65, 3.18),
         #                  (3, 2.5), (2.66, 1.99), (3, 1.5), (2.66, 1.09), (3, 0.5),
         #                  (2.51, 0.73), (2.49, 0.2), (2, 0.77), (2, 0.23)]
-        self.waypoints = [(1.43,0.45),(2.23,0.46),(2.89,0.47),(2.96,1.22),(2.93,2.54),(2.89,3.96),(0.67,4),(0.45,3.63),(1.94,3.7),(1.93,2.56),(1.91,0.59),(2.7,0.67),(2.69,2.31),(2.56,3.64),(1.32,3.47),(0.31,3.36),(0.33,2.44),(0.32,1.29),(0.9,1.33),(0.87,2.14),(1.48,2.28),(1.5,1.5),(1.43,0.45)]
+        #self.waypoints = [(1.43,0.45),(2.23,0.46),(2.89,0.47),(2.96,1.22),(2.93,2.54),(2.89,3.96),(0.67,4),(0.45,3.63),(1.94,3.7),(1.93,2.56),(1.91,0.59),(2.7,0.67),(2.69,2.31),(2.69,3.64),(1.32,3.47),(0.31,3.36),(0.33,2.44),(0.32,1.45),(0.9,1.45),(0.76,2.84),(0.72,2.07),(1.53,2.34),(1.43,0.45)]
+        self.waypoints = [(1.43,0.45),(2.23,0.46),(2.79,0.45),(2.82,1.23),(2.80,2.55),(2.81,3.76),(0.67,4),(0.6,3.6),(1.67,3.58),(1.94,2.9),(1.88,2.28),(1.38,1.96),(0.7,1.83),(0.47,3.42),(0.33,2.44),(0.32,1.48),(0.84,1.49),(1.8,1.6),(1.71,1.11),(1.43,0.45)]
+
         
     def checkCollision(self, start, end, returnPoint=False):
         closest = None
@@ -577,7 +579,7 @@ class ParticleFilter:
             #x = np.random.uniform(arenaMap.bounds_rect[0][0], arenaMap.bounds_rect[1][0])
             #y = np.random.uniform(arenaMap.bounds_rect[0][1], arenaMap.bounds_rect[1][1])
             
-            x, y, orient = self.generateStartPoint(1.43, 0.40, 0.1, 0.1, 90, 3)
+            x, y, orient = self.generateStartPoint(1.43, 0.40, 0.1, 0.1, 225, 3)
             
             #print("test")
             #print(self.arenaMap.checkRobotCollision((x, y), orient))
@@ -824,8 +826,8 @@ class Toddler:
             self.currentOrient = 0
         '''
         self.arenaMap = ArenaMap()
-        self.POIGrid = POIGrid(25, 33, self.arenaMap)
-        self.particleFilter = ParticleFilter(self.arenaMap, 500, self.POIGrid, toddler=self)
+        self.POIGrid = None#POIGrid(25, 33, self.arenaMap)
+        self.particleFilter = ParticleFilter(self.arenaMap, 100, self.POIGrid, toddler=self)
         self.mapRenderer = MapRenderer(self.arenaMap, self.particleFilter, self.POIGrid)
         
         self.counter = 0
@@ -835,9 +837,9 @@ class Toddler:
         
         self.pathIndex = 0
 
-        self.mapRenderer.drawMap()
-        self.mapRenderer.drawParticles(withWeights=False)
-        self.mapRenderer.showMap()
+        #self.mapRenderer.drawMap()
+        #self.mapRenderer.drawParticles(withWeights=False)
+        #self.mapRenderer.showMap()
         
         self.onStart = True
         
@@ -1012,9 +1014,9 @@ class Toddler:
         time.sleep(0.05)
         self.sensors.resetOdometerCount()
         time.sleep(0.05)
-        self.mapRenderer.drawMap()
-        self.mapRenderer.drawParticles()
-        self.mapRenderer.showMap()
+        #self.mapRenderer.drawMap()
+        #self.mapRenderer.drawParticles()
+        #self.mapRenderer.showMap()
         
     def particleFilterControl(self):        
         #self.motorBoard.turnLeft()
@@ -1073,8 +1075,10 @@ class Toddler:
         rotationTime = rotationAmountAngle / angularSpeed
         while(self.motorBoard.getDuration() < rotationTime):
             time.sleep(0.01)
-        self.motorBoard.stopMoving()
-        time.sleep(5)
+        duration, command = self.motorBoard.stopMoving()
+        self.executeCommand(command, duration)        
+        
+        time.sleep(0.5)
 
     def sleepUpdate(self, duration):
         start = time.time()
@@ -1300,10 +1304,37 @@ class Toddler:
                 self.executeCommand(command, duration)
                 currentPos, currentOrient = self.particleFilter.getBestEstimate()            
                 if self.arenaMap.newPOILocation(currentPos):
+                    print("NEW POI DETECTED")
+                    self.motorBoard.moveForward()
+                    time.sleep(0.5)
+                    duration, command = self.motorBoard.stopMoving()
+                    self.executeCommand(command, duration)
+                    currentPos, currentOrient = self.particleFilter.getBestEstimate()
+                    
                     self.arenaMap.addPOILocation(currentPos)
-
-                    self.servoPointControl(currentPos, currentOrient)
+                    
+                    rotationAmountAngle, turnDirection, servoRotation = self.computeHeadingAndServoRotation(currentPos, currentOrient)
+                    while rotationAmountAngle > 5.0:
+                        if turnDirection == "left":
+                            self.motorBoard.turnLeft()
+                            print("turning left")
+                        else:
+                            self.motorBoard.turnRight()
+                            print("turning right")
+                        
+                        self.servo.setPosition(servoRotation)
+                        
+                        rotationTime = rotationAmountAngle / self.getAngularSpeed()
+                        while(self.motorBoard.getDuration() < rotationTime):
+                            time.sleep(0.01)
+                        duration, command = self.motorBoard.stopMoving()
+                        self.executeCommand(command, duration)   
+                        newPos, newOrient = self.particleFilter.getBestEstimate()
+                        rotationAmountAngle, turnDirection, servoRotation = self.computeHeadingAndServoRotation(newPos, newOrient)
+                        time.sleep(0.5)
+                    
                     time.sleep(30)
+                    self.servo.setPosition(0)
         else:
             self.sensors.onPOI = False
             #self.arenaMap.POILocations += []
@@ -1327,7 +1358,10 @@ class Toddler:
             duration, command = self.motorBoard.stopMoving()
             self.sensors.resetOdometerCount()
             self.executeCommand(command, duration)
-        elif not self.motorBoard.motorsEngaged:            
+        elif not self.motorBoard.motorsEngaged:
+            currentPos, currentOrient = self.particleFilter.getBestEstimate()
+            desiredPos = self.arenaMap.waypoints[self.pathIndex]
+            moveVector = np.array(desiredPos) - np.array(currentPos)
             thetaRadians = np.arctan2(moveVector[0], moveVector[1])
             desiredOrient = ((thetaRadians) / (2.0 * np.pi) * 360) % 360
             
