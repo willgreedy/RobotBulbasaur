@@ -25,10 +25,7 @@ odometerAngularSpeed = 360 / 15.0
 odometerSpeed = 3.0 / 59.2
 
 #motorTurnNoise = 70
-motorTurnNoise = 10
-motorTurnPositionNoise = 0.05
-motorForwardNoise = 0.02
-motorDriftNoise = 6
+
 
 robotWidth = 0.25
 robotLength = 0.32
@@ -98,11 +95,18 @@ class SensorManager:
         self.forwardTimeDifferences = [initialForwardTimeDiff]
         self.turnTimeDifferences = [initalTurnTimeDiff]
         
+        self.onPOI = False
+        
     
-    def updateOdometer(self, command):   
+    def updateOdometer(self, command, onPOI, onStart):   
+        if onStart or onPOI:
+            return
+        
         if self.getOdometer() and not self.oldOdometer:
-            if self.lastUpdateTime != None:    
+            if self.lastUpdateTime != None:
+                
                 timeDifference = time.time() - self.lastUpdateTime
+                
                 if command == 'forward':
                     self.forwardTimeDifferences += [timeDifference]
                 elif command == 'turn_left' or command == 'turn_right':
@@ -130,7 +134,11 @@ class SensorManager:
     
     def getLightSensors(self):
         locations = self.sensorLocations.getLightSensors()
-        return [self.sensorReadings[i] for i in locations]
+        readings = []
+        for i in locations:
+            readings += [self.sensorReadings[i]]
+            time.sleep(0.05)
+        return readings
     
     def getIRSensorLeft(self):
         location = self.sensorLocations.getIRSensorLeft()
@@ -164,7 +172,7 @@ class SensorManager:
         self.lastUpdateTime = None
     
     def getAverageForwardTimeDifference(self):
-        print("Forward", self.forwardTimeDifferences)
+        #print("Forward", self.forwardTimeDifferences)
         return np.median(self.forwardTimeDifferences)
     
     def getAverageTurnTimeDifference(self):
@@ -182,7 +190,7 @@ class MotorBoardManager:
         
     def turnLightOn(self):
         lightLocation = self.motorBoardLocations.getLight()
-        self.motorControl.setMotor(lightLocation, 100)
+        self.motorControl.setMotor(lightLocation, 70)
         
     def turnLightOff(self):
         lightLocation = self.motorBoardLocations.getLight()
@@ -225,7 +233,9 @@ class MotorBoardManager:
         rightMotor = self.motorBoardLocations.getRightMotor()
         self.motorControl.stopMotor(leftMotor)
         self.motorControl.stopMotor(rightMotor)
-        return duration, self.currentCommand
+        command = self.currentCommand
+        self.currentCommand = 'stopped'
+        return duration, command
         
     def stopAll(self):
         self.setEngaged(False)
@@ -303,10 +313,18 @@ class ArenaMap:
         self.obstacles = [outer_wall, tri_obstacle, rect_obstacle]
         
         self.startPos = np.array([1.4, 0.41])
-        self.satellitePos = np.array([0.69, -0.1])
+        self.satellitePos = np.array([0.69, -0.03])
         self.satelliteHeight = 2.95
-        self.POIpos1 = np.array([1.755, 3.725])
-        self.POIpos2 = np.array([0.47, 2.37])
+        
+        self.POILocations = []
+        
+        #self.waypoints = [(1.43, 0.4), (1.43, 1.5), (0.3, 1.5), (0.35, 3.4),
+        #                  (0.65, 3.4), (0.65, 1.66), (1.95, 1.66), (1.29, 2.12),
+        #                  (2, 2.5), (2, 3), (0.75, 3.95), (2.9, 3.95), (2.9, 3.75),
+        #                  (0.75, 3.75), (0.75, 3.6), (2.9, 3.6), (2.65, 3.18),
+        #                  (3, 2.5), (2.66, 1.99), (3, 1.5), (2.66, 1.09), (3, 0.5),
+        #                  (2.51, 0.73), (2.49, 0.2), (2, 0.77), (2, 0.23)]
+        self.waypoints = [(1.43,0.45),(2.23,0.46),(2.89,0.47),(2.96,1.22),(2.93,2.54),(2.89,3.96),(0.67,4),(0.45,3.63),(1.94,3.7),(1.93,2.56),(1.91,0.59),(2.7,0.67),(2.69,2.31),(2.56,3.64),(1.32,3.47),(0.31,3.36),(0.33,2.44),(0.32,1.29),(0.9,1.33),(0.87,2.14),(1.48,2.28),(1.5,1.5),(1.43,0.45)]
         
     def checkCollision(self, start, end, returnPoint=False):
         closest = None
@@ -379,13 +397,29 @@ class ArenaMap:
         #print([frontCollide, rightCollide, backCollide, leftCollide])
         
         return frontCollide or rightCollide or backCollide or leftCollide
-
+    
+    
+    def addPOILocation(self, pos):
+        isNew = self.newPOILocation(pos)
+        if isNew:
+            self.POILocations += [pos]
+            
+    def newPOILocation(self, pos):
+        isNew = True
+        for poi in self.POILocations:
+            if np.linalg.norm(np.array(pos) - np.array(poi)) < 0.4:
+                isNew = False
+        return isNew
+                
+        
+        
 class Particle:
     
-    def __init__(self, arenaMap, pos, orient, toddler):
+    def __init__(self, arenaMap, pos, orient, particleFilter, toddler):
         self.arenaMap = arenaMap
         self.pos = pos
         self.orient = orient
+        self.particleFilter = particleFilter
         self.toddler = toddler
         
         self.weight = 0
@@ -393,9 +427,16 @@ class Particle:
     def moveForward(self, duration, backwards=False):
         orientVec = computeOrientationVector(self.orient)
         
+        #motorForwardNoise = self.particleFilter.motorForwardNoise * 10 if self.particleFilter.explore else self.particleFilter.motorForwardNoise
+        motorForwardNoise = self.particleFilter.motorForwardNoise * self.particleFilter.exploreFactor
+        #motorDriftNoise = self.particleFilter.motorDriftNoise * 10 if self.particleFilter.explore else self.particleFilter.motorDriftNoise
+        motorDriftNoise = self.particleFilter.motorDriftNoise * self.particleFilter.exploreFactor
+        
         distanceMoved = self.toddler.motorSpeed * duration
         forwardNoise =  distanceMoved * orientVec * np.random.normal(0, motorForwardNoise)
         positionChangeVector = (-1 if backwards else 1) * distanceMoved * orientVec + forwardNoise
+        
+
         
         driftNoise = distanceMoved * np.random.normal(0, motorDriftNoise)
         newOrient = (self.orient + driftNoise) % 360
@@ -436,7 +477,14 @@ class Particle:
         #print("BEFORE: " + str(self.orient))
         
         #print(self.toddler.angularSpeed)
-        turns = self.toddler.angularSpeed * duration / 360.0     
+        turns = self.toddler.getAngularSpeed() * duration / 360.0
+        
+        exploreFactor = self.particleFilter.exploreFactor#10.0 if self.particleFilter.explore else 1.0
+        onPoiFactor = 2.0 if self.toddler.sensors.onPOI else 1.0
+        
+        motorTurnNoise = self.particleFilter.motorTurnNoise * exploreFactor * onPoiFactor
+        #motorTurnPositionNoise = self.particleFilter.motorTurnPositionNoise * 10 if self.particleFilter.explore else self.particleFilter.motorTurnPositionNoise
+        motorTurnPositionNoise = self.particleFilter.motorTurnPositionNoise * self.particleFilter.exploreFactor
         
         #self.orient += (-1 if isLeft else 1) * duration / motorFullTurnTime * 360 + turns * np.random.normal(0, motorTurnNoise)
         newOrient = (self.orient + (-1 if isLeft else 1) * turns * 360 + turns * np.random.normal(0, motorTurnNoise)) % 360
@@ -510,12 +558,20 @@ class ParticleFilter:
         self.arenaMap = arenaMap 
         self.POIGrid = POIGrid
         self.particles = []
+        
+        self.motorTurnNoise = 15
+        self.motorTurnPositionNoise = 0.08
+        self.motorForwardNoise = 0.02
+        self.motorDriftNoise = 6
+        
+        self.exploreFactor = 1.0
+        
         while len(self.particles) < num_particles:
             
             #x = np.random.uniform(arenaMap.bounds_rect[0][0], arenaMap.bounds_rect[1][0])
             #y = np.random.uniform(arenaMap.bounds_rect[0][1], arenaMap.bounds_rect[1][1])
             
-            x, y, orient = self.generateStartPoint(1.43, 0.40, 0.1, 0.1, 0, 3)
+            x, y, orient = self.generateStartPoint(1.43, 0.40, 0.1, 0.1, 90, 3)
             
             #print("test")
             #print(self.arenaMap.checkRobotCollision((x, y), orient))
@@ -527,8 +583,11 @@ class ParticleFilter:
 
 
             if arenaMap.checkInsideMap((x, y)):
-                self.particles += [Particle(arenaMap, (x, y), orient, toddler=toddler)]
-        self.bestParticle = self.particles[0]
+                self.particles += [Particle(arenaMap, (x, y), orient, particleFilter=self, toddler=toddler)]
+        
+        self.bestParticlePos = self.particles[0].pos
+        self.bestParticleOrient = self.particles[0].orient
+        #self.bestParticle = self.particles[0]
                 
     def generateStartPoint(self, xPos, yPos, xRange, yRange, orientation, orientRange):
         x = xPos + np.random.uniform(-xRange/2.0, xRange/2.0)
@@ -588,9 +647,9 @@ class ParticleFilter:
         return prob
     
     def computeIRNoise(self, distance):
-        closeIRNoiseStd = 150
-        normalIRNoiseStd = 25
-        maxIRNoiseStd = 75
+        closeIRNoiseStd = 200
+        normalIRNoiseStd = 20
+        maxIRNoiseStd = 45
 
         maxAccurateRange = 1.0
         
@@ -613,6 +672,15 @@ class ParticleFilter:
         weights = [particle.weight for particle in self.particles]
         total = sum(weights)
         print(total)
+        
+        if total < 1e-4:
+            self.exploreFactor = int(min(-np.log10(total), 15))
+            print("Starting to explore...: ", self.exploreFactor)
+            #self.explore = True
+        else:
+            #self.explore = False
+            self.exploreFactor = 1.0
+        
         for particle in self.particles:
             particle.weight /= total
             
@@ -638,10 +706,36 @@ class ParticleFilter:
             newParticles.append(selectedParticle)
         
         self.particles = newParticles
-        self.bestParticle = self.particles[np.argmax([particle.weight for particle in self.particles])]
+        
+        totalPos = np.array([0.0, 0.0])
+        totalOrientVec = np.array([0.0, 0.0])
+        
+        for particle in self.particles:
+            totalPos[0] += particle.pos[0] * particle.weight
+            totalPos[1] += particle.pos[1] * particle.weight
+            #print("Orient", particle.orient)
+            totalOrientVec += computeOrientationVector(particle.orient) * particle.weight
+        
+        
+        total = np.sum([p.weight for p in self.particles])
+        
+        averagePos = (totalPos[0] / total, totalPos[1] / total)
+        averageOrientVec = totalOrientVec / np.linalg.norm(totalOrientVec)
+        averageOrient = (np.arctan2(averageOrientVec[0], averageOrientVec[1]) / (2.0 * np.pi) * 360) % 360
+        
+        #print("Average Pos", averagePos)
+        #print("Average Orient", averageOrient)
+        #print("Average Orient Vec", averageOrientVec)
+        
+        
+        self.bestParticlePos = averagePos
+        self.bestParticleOrient = averageOrient
+        #self.bestParticle = self.particles[np.argmax([particle.weight for particle in self.particles])]
         
     def getBestEstimate(self):
-        return self.bestParticle.pos, self.bestParticle.orient
+        return self.bestParticlePos, self.bestParticleOrient
+        #return self.bestParticle.pos, self.bestParticle.orient
+
 
 class POIGrid:
     
@@ -708,8 +802,7 @@ class Toddler:
         self.motorBoard = MotorBoardManager(self.mc)
         self.servo = ServoManager(self.sc)
         
-        #self.motorBoard.turnLightOn()
-        
+        self.motorBoard.turnLightOn()
         
         self.servoHeight = 0.2
 
@@ -735,27 +828,22 @@ class Toddler:
         self.angularSpeed = 0
         
         self.pathIndex = 0
-        #self.waypoints = [(1.43, 0.4), (1.43, 1.74), (0.43, 1.74), (0.43, 3.68), (1.95, 3.68), (1.95, 1.74), (1.95, 0.4), (2.82, 0.6), (2.82, 3.5)]
-        self.waypoints = [(1.43, 0.4), (1.43, 1.4), (0.3, 1.4), (0.35, 3.4),
-                          (0.65, 3.4), (0.65, 1.66), (1.95, 1.66), (1.29, 2.12),
-                          (2, 2.5), (2, 3), (0.75, 3.95), (2.9, 3.95), (2.9, 3.75),
-                          (0.75, 3.75), (0.75, 3.6), (2.9, 3.6), (2.65, 3.18),
-                          (3, 2.5), (2.66, 1.99), (3, 1.5), (2.66, 1.09), (3, 0.5),
-                          (2.51, 0.73), (2.49, 0.2), (2, 0.77), (2, 0.23)]
-        
+
         self.mapRenderer.drawMap()
         self.mapRenderer.drawParticles(withWeights=False)
         self.mapRenderer.showMap()
         
+        self.onStart = True
+        
         
     
-    def computeHeadingAndServoRotation(self):
-        targetDirection = self.currentPos - self.satellitePos
+    def computeHeadingAndServoRotation(self, currentPos, currentOrient):
+        targetDirection = currentPos - self.arenaMap.satellitePos
         
         theta_radians = np.arctan2(targetDirection[0], targetDirection[1])
         rotationAngle = (theta_radians) / (2.0 * np.pi) * 360
         
-        epsilon = (self.currentOrient - rotationAngle) % 360
+        epsilon = (currentOrient - rotationAngle) % 360
         
         if epsilon < 90:
             turnDirection = "left"
@@ -774,8 +862,8 @@ class Toddler:
             turnAngle = 360 - epsilon
             servoInverted = True
         
-        horizontalDistance = np.linalg.norm(self.currentPos - self.satellitePos)
-        verticalDistance = self.satelliteHeight - self.servoHeight
+        horizontalDistance = np.linalg.norm(currentPos - self.arenaMap.satellitePos)
+        verticalDistance = self.arenaMap.satelliteHeight - self.servoHeight
         
         servoRotationRadians = np.arctan(verticalDistance / horizontalDistance)
         print(servoRotationRadians)
@@ -791,7 +879,8 @@ class Toddler:
     def control(self):
         
         
-        self.followPathControl()
+        self.pathWithCollisionAvoidanceControl()
+        #self.followPathControl()
         #self.collisionAvoidanceControl()
         #self.particleFilterControl()
 
@@ -872,23 +961,28 @@ class Toddler:
         time.sleep(10)
     
     def fullTurnControl(self):
-        self.motorBoard.moveForward()
-        startTime = time.time()
-        while self.sensors.getOdometerCount() <= 36:
-            time.sleep(0.05)
-        duration = time.time() - startTime
-        self.sensors.resetOdometerCount()
+        #while self.sensors.getOdometerCount() <= 36:
+        #    time.sleep(0.05)
+        #duration = time.time() - startTime
+        #self.sensors.resetOdometerCount()
         #self.sleepUpdate(motorFullTurnTime)
-        self.motorBoard.stopMoving()
-        time.sleep(3)
+        #self.motorBoard.stopMoving()
+        #time.sleep(3)
         self.motorBoard.turnRight()
-        self.sleepUpdate(duration / 3.0)
+        self.sleepUpdate(8.25)
         self.motorBoard.stopMoving()
         
-    
+    def getAngularSpeed(self):
+        if self.sensors.onPOI:
+            return self.angularSpeed * 0.75
+        elif self.onStart:
+            return self.angularSpeed * 0.5
+        else:
+            return self.angularSpeed
     
     def executeCommand(self, command, duration):
-        
+        if command == 'stopped':
+            return
         leftIRReadings = []
         rightIRReadings = []
         
@@ -937,11 +1031,18 @@ class Toddler:
         lightSensors = self.sensors.getLightSensors()
         light = lightSensors[0]
         
-        lightUpperThreshold = 62
+        lightUpperThreshold = 550
+        lightLowerThreshold = 390
+        
+        print(light)
         
         if light > lightUpperThreshold:# or light < lightLowerThreshold:
             print("POI Detected")
             time.sleep(0.5)
+            self.motorBoard.stopMoving()
+            time.sleep(5)
+        if light < lightLowerThreshold:
+            print("Start position detected")
             self.motorBoard.stopMoving()
             time.sleep(5)
         else:
@@ -949,14 +1050,8 @@ class Toddler:
 
         time.sleep(0.05)
 
-    def servoPointControl(self):
-        if self.facingSatellite:
-            return
-        self.facingSatellite = True
-        
-        time.sleep(1)
-
-        rotationAmountAngle, turnDirection, servoRotation = self.computeHeadingAndServoRotation()
+    def servoPointControl(self, currentPos, currentOrient):        
+        rotationAmountAngle, turnDirection, servoRotation = self.computeHeadingAndServoRotation(currentPos, currentOrient)
         
         if turnDirection == "left":
             self.motorBoard.turnLeft()
@@ -966,7 +1061,11 @@ class Toddler:
             print("turning right")
         
         self.servo.setPosition(servoRotation)
-        while(self.motorBoard.getDuration() < (motorFullTurnTime * rotationAmountAngle / 360)):
+        
+        angularSpeed = self.getAngularSpeed()
+        
+        rotationTime = rotationAmountAngle / angularSpeed
+        while(self.motorBoard.getDuration() < rotationTime):
             time.sleep(0.01)
         self.motorBoard.stopMoving()
         time.sleep(5)
@@ -1010,12 +1109,12 @@ class Toddler:
         duration, command = self.motorBoard.stopMoving()
         self.sensors.resetOdometerCount()
         self.executeCommand(command, duration)
-        self.sleepUpdate(0.25)
-        self.motorBoard.turnLeft()
-        self.sleepUpdate(rnd)
-        duration, command = self.motorBoard.stopMoving()
-        self.sensors.resetOdometerCount()
-        self.executeCommand(command, duration)
+        #self.sleepUpdate(0.25)
+        #self.motorBoard.turnLeft()
+        #self.sleepUpdate(rnd)
+        #duration, command = self.motorBoard.stopMoving()
+        #self.sensors.resetOdometerCount()
+        #self.executeCommand(command, duration)
 
     def updateSpeedEstimates(self):
         
@@ -1025,8 +1124,10 @@ class Toddler:
         self.motorSpeed = odometerSpeed / averageForwardTimeDifference
         self.angularSpeed = odometerAngularSpeed / averageTurnTimeDifference
         
-        print("Motor Speed", self.motorSpeed)
-        print("Angular Speed", self.angularSpeed)
+        #print("Motor Speed", self.motorSpeed)
+        #print("Angular Speed", self.angularSpeed)
+        #print("Speed ratio", self.motorSpeed / self.angularSpeed)
+        
 
 
     def followPathControl(self):
@@ -1034,26 +1135,27 @@ class Toddler:
         self.updateSpeedEstimates()
         
         currentPos, currentOrient = self.particleFilter.getBestEstimate()
-        print("Current Pos", currentPos)
-        print("Current Orient", currentOrient)
-        desiredPos = self.waypoints[self.pathIndex]
-        print("Desired pos", desiredPos)
+        #print("Current Pos", currentPos)
+        #print("Current Orient", currentOrient)
+        desiredPos = self.arenaMap.waypoints[self.pathIndex]
+        #print("Desired pos", desiredPos)
         moveVector = np.array(desiredPos) - np.array(currentPos)
         
         if np.linalg.norm(moveVector) < 0.2:
             print("Waypoint Found!!!!")
             self.pathIndex += 1
-            #desiredPos = self.waypoints[self.pathIndex]
+            print(self.pathIndex)
+            #desiredPos = self.arenaMap.waypoints[self.pathIndex]
             #moveVector = np.array(currentPos) - np.array(desiredPos)
             return
         
-        print(moveVector)
+        #print(moveVector)
         thetaRadians = np.arctan2(moveVector[0], moveVector[1])
         desiredOrient = ((thetaRadians) / (2.0 * np.pi) * 360) % 360
-        print("Current angle", currentOrient, "Desired", desiredOrient)
+        #print("Current angle", currentOrient, "Desired", desiredOrient)
         
         rotationAngle = (desiredOrient - currentOrient) % 360
-        print("Rotation Angle", rotationAngle)
+        #print("Rotation Angle", rotationAngle)
         
         if rotationAngle < 8.0 or rotationAngle > 352.0:
             moveDistance = min(np.linalg.norm(moveVector), 1.0)
@@ -1064,11 +1166,11 @@ class Toddler:
             self.executeCommand(command, duration)
         else:
             if rotationAngle < 180:
-                rotationTime = rotationAngle / self.angularSpeed
+                rotationTime = rotationAngle / self.getAngularSpeed()
                 self.motorBoard.turnRight()
             else:
                 rotationAngle = 360 - rotationAngle
-                rotationTime = rotationAngle / self.angularSpeed
+                rotationTime = rotationAngle / self.getAngularSpeed()
                 self.motorBoard.turnLeft()
             time.sleep(rotationTime)
             duration, command = self.motorBoard.stopMoving()
@@ -1105,10 +1207,14 @@ class Toddler:
         light = lightSensors[0]
         rnd = 1.5 + 0.5 * np.random.rand()
         
-        #if light > lightUpperThreshold:# or light < lightLowerThreshold:
-        #    print("POI Detected")
-        #    self.motorBoard.stopMoving()
+        self.sensors.onPOI = False
+        if light > lightUpperThreshold:# or light < lightLowerThreshold:
+            print("POI Detected")
+            #self.motorBoard.stopMoving()
+            self.sensors.onPOI = True
         #    time.sleep(5)
+        
+        
         if whiskerLeft and not whiskerRight:
             self.avoidRight(rnd)
         elif whiskerRight and not whiskerLeft:
@@ -1139,12 +1245,109 @@ class Toddler:
             self.motorBoard.moveForward()
             
         time.sleep(0.05)
+    
+    def pathWithCollisionAvoidanceControl(self):
+        self.updateSpeedEstimates()
+        
+        if not self.motorBoard.motorsEngaged:
+            currentPos, currentOrient = self.particleFilter.getBestEstimate()
+            if self.onStart:
+                #print(abs(currentPos[0] - self.arenaMap.startPos[0]), abs(currentPos[1] - self.arenaMap.startPos[1]))
+                if abs(currentPos[0] - self.arenaMap.startPos[0]) > 0.16 or abs(currentPos[1] - self.arenaMap.startPos[1]) > 0.23:
+                    self.onStart = False
+                    
+            desiredPos = self.arenaMap.waypoints[self.pathIndex]
+            moveVector = np.array(desiredPos) - np.array(currentPos)
             
+            if np.linalg.norm(moveVector) < 0.2:
+                print("Waypoint Found!!!!")
+                self.pathIndex += 1
+                print(self.pathIndex)
+                return
+        
+        
+        irThreshold = 400
+        lightUpperThreshold = 530
+        lightLowerThreshold = 390
+        sonarThreshold = 20
+        
+        time.sleep(0.05)
+        leftIR = self.sensors.getIRSensorLeft()
+        time.sleep(0.05)
+        rightIR = self.sensors.getIRSensorRight() 
+        time.sleep(0.05)
+        whiskerLeft = self.sensors.getWhiskerLeft()
+        time.sleep(0.05)
+        whiskerRight = self.sensors.getWhiskerRight()
+        time.sleep(0.05)
+        sonar = self.sensors.getSonar()
+        time.sleep(0.05)
+        lightSensor = self.sensors.getLightSensors()[0]
+        time.sleep(0.05)
+        
+        print(lightSensor)
+        
+        if lightSensor > lightUpperThreshold:
+            if self.sensors.onPOI == False:
+                self.sensors.onPOI = True
+                duration, command = self.motorBoard.stopMoving()
+                self.executeCommand(command, duration)
+                currentPos, currentOrient = self.particleFilter.getBestEstimate()            
+                if self.arenaMap.newPOILocation(currentPos):
+                    self.arenaMap.addPOILocation(currentPos)
+
+                    self.servoPointControl(currentPos, currentOrient)
+                    time.sleep(30)
+        else:
+            self.sensors.onPOI = False
+            #self.arenaMap.POILocations += []
+        
+        rnd = 0.5 + 0.75 * np.random.rand()
+        if whiskerLeft and not whiskerRight:
+            self.avoidRight(rnd)
+        elif whiskerRight and not whiskerLeft:
+            self.avoidLeft(rnd)
+        elif whiskerLeft and whiskerRight:
+            self.avoidBack(rnd)
+        elif leftIR > irThreshold and rightIR < irThreshold:
+            self.avoidRight(rnd)
+        elif rightIR > irThreshold and leftIR < irThreshold:
+            self.avoidLeft(rnd)
+        elif leftIR > irThreshold and rightIR > irThreshold:
+            self.avoidBack(rnd)
+        elif sonar < sonarThreshold:
+            self.avoidBack(rnd + 0.1)
+        elif self.motorBoard.motorsEngaged and self.motorBoard.getDuration() > self.pathDuration:
+            duration, command = self.motorBoard.stopMoving()
+            self.sensors.resetOdometerCount()
+            self.executeCommand(command, duration)
+        elif not self.motorBoard.motorsEngaged:            
+            thetaRadians = np.arctan2(moveVector[0], moveVector[1])
+            desiredOrient = ((thetaRadians) / (2.0 * np.pi) * 360) % 360
+            
+            rotationAngle = (desiredOrient - currentOrient) % 360
+            
+            if rotationAngle < 12.0 or rotationAngle > 348.0:
+                moveDistance = min(np.linalg.norm(moveVector), 0.6)
+                moveTime = moveDistance / self.motorSpeed
+                self.motorBoard.moveForward()
+                self.pathDuration = moveTime
+            else:
+                if rotationAngle < 180:
+                    rotationTime = rotationAngle / self.getAngularSpeed()
+                    self.motorBoard.turnRight()
+                else:
+                    rotationAngle = 360 - rotationAngle
+                    rotationTime = rotationAngle / self.getAngularSpeed()
+                    self.motorBoard.turnLeft()
+                self.pathDuration = rotationTime
     
     def vision(self):
         
         if self.motorBoard.motorsEngaged:
-            self.sensors.updateOdometer(self.motorBoard.currentCommand)
+            onPOI = self.sensors.onPOI
+            onStart = self.onStart
+            self.sensors.updateOdometer(self.motorBoard.currentCommand, onPOI, onStart)
         time.sleep(0.005)
         #image = self.camera.getFrame()
         #self.camera.imshow('Camera', image)
@@ -1277,6 +1480,19 @@ class MapRenderer:
                 
                 cv2.line(self.img, (p1x,p1y), (p2x, p2y), (0,0,0), 2)
                 #plt.plot([p1[0], p2[0]], [p1[1], p2[1]], color='k', linestyle='-', linewidth=2)
+        
+        self.drawPath()
+        
+    def drawPath(self):
+        for i in range(len(self.arenaMap.waypoints) - 1):
+            currentWaypoint = self.arenaMap.waypoints[i]
+            nextWaypoint = self.arenaMap.waypoints[(i+1) % len(self.arenaMap.waypoints)]
+            
+            currImgX, currImgY = self.convertToImgCoords(currentWaypoint[0], currentWaypoint[1])
+            nextImgX, nextImgY = self.convertToImgCoords(nextWaypoint[0], nextWaypoint[1])
+            
+            cv2.circle(self.img, (currImgX, currImgY), 7, (255, 0, ), thickness=-1)          
+            cv2.line(self.img, (currImgX, currImgY), (nextImgX, nextImgY), (255, 0, 0), 2)
 
     def drawPOIGrid(self):
         cellWidth = self.POIGrid.getCellWidth()
@@ -1401,14 +1617,14 @@ class MapRenderer:
             cv2.circle(self.img, (rightIRImgX, rightIRImgY), 4, (0, 255, 0), thickness=-1)'''
         
         if withWeights:
-            bestParticle = self.particleFilter.particles[np.argmax(weights)]
+            bestParticlePos, bestParticleOrient = self.particleFilter.getBestEstimate()#particles[np.argmax(weights)]
             
-            bestParticleImgX = int(self.scale * (particle.pos[0] + self.padding))
-            bestParticleImgY = self.imgHeight - int(self.scale * (particle.pos[1] + self.padding))
+            bestParticleImgX = int(self.scale * (bestParticlePos[0] + self.padding))
+            bestParticleImgY = self.imgHeight - int(self.scale * (bestParticlePos[1] + self.padding))
             
             
             cv2.circle(self.img, (bestParticleImgX, bestParticleImgY), 4, (0,0,0), thickness=-1)
-            orientVec = computeOrientationVector(bestParticle.orient) * 30
+            orientVec = computeOrientationVector(bestParticleOrient) * 30
             orientVec[1] = -orientVec[1]
     
             cv2.line(self.img, (bestParticleImgX, bestParticleImgY), (bestParticleImgX + int(orientVec[0]), bestParticleImgY + int(orientVec[1])), (0,0,0), 2)            
